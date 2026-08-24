@@ -1,0 +1,7 @@
+[package]
+name = "qcy-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Independent QCY BLE GATT framing, advertisement parser, and command codecs"
+publish = false

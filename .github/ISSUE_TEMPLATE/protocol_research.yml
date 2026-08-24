@@ -1,0 +1,26 @@
+name: Protocol research
+description: Track an opcode, payload, UUID, device capability, or packet capture that still needs evidence
+title: "protocol: "
+labels: ["protocol", "research"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+      description: State exactly what is unknown.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Existing evidence
+      description: Captures, reproducible observations, public references, firmware/device version. Do not guess missing fields.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Evidence required to close
+      description: Define what would be enough to upgrade the capability state or document the result.
+    validations:
+      required: true

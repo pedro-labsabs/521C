@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/qcy-protocol", "crates/521cctl"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"

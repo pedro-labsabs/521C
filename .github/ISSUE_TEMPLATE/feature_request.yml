@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a user-facing or engineering feature
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired outcome without inventing protocol support.
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Requires new protocol knowledge?
+      options: ["No", "Maybe / unknown", "Yes — evidence available"]
+    validations:
+      required: true

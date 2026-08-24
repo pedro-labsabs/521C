@@ -1,0 +1,29 @@
+name: Bug report
+description: Report reproducible incorrect behavior in 521C
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device / model
+      placeholder: QCY MeloBuds Pro / HT08
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal steps and relevant logs. Redact private identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, desktop/audio stack, browser/native path, and 521C revision.
