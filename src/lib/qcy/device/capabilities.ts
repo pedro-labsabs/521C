@@ -1,135 +1,455 @@
-import type { CapabilityState } from "../protocol/types";
+/**
+ * Capability truth model (issue #3).
+ *
+ * A capability is described by four independent truths instead of one ambiguous
+ * state, so the UI/CLI/docs cannot confuse "the device/protocol can do this"
+ * with "this build implements it":
+ *
+ *   hardware       – is the feature associated with the hardware/model?
+ *   protocol       – is the protocol behavior evidenced for this model/firmware?
+ *   implementation – does this build actually implement it?
+ *   write          – is the operation writable / experimental / read-only / forbidden?
+ *
+ * Deterministic rules below derive what is shown, enabled and writable. Host-only
+ * features (system EQ, auto game mode, codec status) stay `not-implemented` or
+ * `mock-only` until a real host backend exists (issue #13); they are never
+ * presented as QCY protocol capabilities.
+ */
 
-export type FeatureFlag = {
-  state: CapabilityState;
+export type EvidenceTruth = "supported" | "unknown" | "unsupported";
+export type ImplTruth = "implemented" | "mock-only" | "not-implemented";
+export type WriteReadiness = "writable" | "experimental" | "read-only" | "forbidden";
+
+export type CapabilityTruth = {
+  hardware: EvidenceTruth;
+  protocol: EvidenceTruth;
+  implementation: ImplTruth;
+  write: WriteReadiness;
   note?: string;
-  protocol?: string;
+  /** Evidence-ledger opcode reference when the capability is protocol-backed. */
+  opcode?: number;
 };
 
+/** Backwards-compatible alias used by existing call sites during migration. */
+export type FeatureFlag = CapabilityTruth;
+
 export type DeviceCapabilities = {
-  batteryLeft: FeatureFlag;
-  batteryRight: FeatureFlag;
-  batteryCase: FeatureFlag;
-  chargingFlags: FeatureFlag;
-  firmware: FeatureFlag;
-  rssi: FeatureFlag;
-  ancOff: FeatureFlag;
-  ancOn: FeatureFlag;
-  ancAdaptive: FeatureFlag;
-  ancIndoor: FeatureFlag;
-  ancCommuting: FeatureFlag;
-  ancNoisy: FeatureFlag;
-  ancWind: FeatureFlag;
-  ancLevels: FeatureFlag;
-  transparency: FeatureFlag;
-  transparencyLevels: FeatureFlag;
-  vocalEnhance: FeatureFlag;
-  gameMode: FeatureFlag;
-  autoGameMode: FeatureFlag;
-  deviceEq: FeatureFlag;
-  systemEq: FeatureFlag;
-  eqPresets: FeatureFlag;
-  eqCustom: FeatureFlag;
-  eqPerChannel: FeatureFlag;
-  touchControls: FeatureFlag;
-  wearDetection: FeatureFlag;
-  wearAutoPause: FeatureFlag;
-  sleepMode: FeatureFlag;
-  spatialAudio: FeatureFlag;
-  multipointStatus: FeatureFlag;
-  multipointControl: FeatureFlag;
-  findChime: FeatureFlag;
-  findRssi: FeatureFlag;
-  findGps: FeatureFlag;
-  ldacToggle: FeatureFlag;
-  ldacBitrate: FeatureFlag;
-  codecStatus: FeatureFlag;
-  rename: FeatureFlag;
-  firmwareOta: FeatureFlag;
-  inEarSensitivity: FeatureFlag;
-  soundBalance: FeatureFlag;
-  earTipFit: FeatureFlag;
+  batteryLeft: CapabilityTruth;
+  batteryRight: CapabilityTruth;
+  batteryCase: CapabilityTruth;
+  chargingFlags: CapabilityTruth;
+  firmware: CapabilityTruth;
+  rssi: CapabilityTruth;
+  ancOff: CapabilityTruth;
+  ancOn: CapabilityTruth;
+  ancAdaptive: CapabilityTruth;
+  ancIndoor: CapabilityTruth;
+  ancCommuting: CapabilityTruth;
+  ancNoisy: CapabilityTruth;
+  ancWind: CapabilityTruth;
+  ancLevels: CapabilityTruth;
+  transparency: CapabilityTruth;
+  transparencyLevels: CapabilityTruth;
+  vocalEnhance: CapabilityTruth;
+  gameMode: CapabilityTruth;
+  autoGameMode: CapabilityTruth;
+  deviceEq: CapabilityTruth;
+  systemEq: CapabilityTruth;
+  eqPresets: CapabilityTruth;
+  eqCustom: CapabilityTruth;
+  eqPerChannel: CapabilityTruth;
+  touchControls: CapabilityTruth;
+  wearDetection: CapabilityTruth;
+  wearAutoPause: CapabilityTruth;
+  sleepMode: CapabilityTruth;
+  spatialAudio: CapabilityTruth;
+  multipointStatus: CapabilityTruth;
+  multipointControl: CapabilityTruth;
+  findChime: CapabilityTruth;
+  findRssi: CapabilityTruth;
+  findGps: CapabilityTruth;
+  ldacToggle: CapabilityTruth;
+  ldacBitrate: CapabilityTruth;
+  codecStatus: CapabilityTruth;
+  rename: CapabilityTruth;
+  firmwareOta: CapabilityTruth;
+  inEarSensitivity: CapabilityTruth;
+  soundBalance: CapabilityTruth;
+  earTipFit: CapabilityTruth;
 };
 
 export const HT08_CAPABILITIES: DeviceCapabilities = {
-  batteryLeft: { state: "supported", protocol: "0x2F / char 00000008" },
-  batteryRight: { state: "supported", protocol: "0x2F / char 00000008" },
-  batteryCase: { state: "supported", protocol: "0x2F / char 00000008" },
-  chargingFlags: { state: "supported", protocol: "bit7 of battery bytes" },
-  firmware: { state: "supported", protocol: "0x30 / char 00000007" },
-  rssi: { state: "supported", note: "Host BLE RSSI, not GPS" },
-  ancOff: { state: "supported", protocol: "0x0C mode 0x00 / 0x17" },
-  ancOn: { state: "supported", protocol: "0x0C mode 0x01" },
-  ancAdaptive: {
-    state: "experimental",
-    protocol: "0x32 EnvAdaptation + ANC on",
-    note: "HT08 hardware advertises Adaptive ANC; mapping onto 0x32 is experimental until captured on-device.",
+  batteryLeft: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "read-only",
+    note: "0x2F / char 00000008",
+    opcode: 0x2f,
   },
-  ancIndoor: { state: "supported", protocol: "0x17 mode 0x02 sub 1–3 (silent)" },
-  ancCommuting: { state: "supported", protocol: "0x17 mode 0x03 sub 1–3 (working)" },
-  ancNoisy: { state: "supported", protocol: "0x17 mode 0x04 sub 1–3" },
+  batteryRight: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "read-only",
+    note: "0x2F / char 00000008",
+    opcode: 0x2f,
+  },
+  batteryCase: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "read-only",
+    note: "0x2F / char 00000008",
+    opcode: 0x2f,
+  },
+  chargingFlags: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "read-only",
+    note: "bit7 of battery bytes",
+    opcode: 0x2f,
+  },
+  firmware: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "read-only",
+    note: "0x30 / char 00000007",
+    opcode: 0x30,
+  },
+  rssi: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "implemented",
+    write: "read-only",
+    note: "Host BLE RSSI, not GPS",
+  },
+  ancOff: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x0C mode 0x00 / 0x17",
+    opcode: 0x0c,
+  },
+  ancOn: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x0C mode 0x01",
+    opcode: 0x0c,
+  },
+  ancAdaptive: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "experimental",
+    note: "HT08 hardware advertises Adaptive ANC; 0x32 mapping experimental until captured on-device.",
+    opcode: 0x32,
+  },
+  ancIndoor: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x17 mode 0x02 sub 1-3 (silent)",
+    opcode: 0x17,
+  },
+  ancCommuting: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x17 mode 0x03 sub 1-3 (working)",
+    opcode: 0x17,
+  },
+  ancNoisy: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x17 mode 0x04 sub 1-3",
+    opcode: 0x17,
+  },
   ancWind: {
-    state: "requires-protocol-research",
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
     note: "Present in the official app; no public opcode isolated yet.",
   },
-  ancLevels: { state: "supported", protocol: "0x17 subScene 1–3" },
-  transparency: { state: "supported", protocol: "0x0C mode 0x03 / 0x17 mode 0x0A" },
-  transparencyLevels: { state: "supported", protocol: "0x17 mode 0x0A sub 1–7" },
+  ancLevels: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x17 subScene 1-3",
+    opcode: 0x17,
+  },
+  transparency: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x0C mode 0x03 / 0x17 mode 0x0A",
+    opcode: 0x0c,
+  },
+  transparencyLevels: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x17 mode 0x0A sub 1-7",
+    opcode: 0x17,
+  },
   vocalEnhance: {
-    state: "experimental",
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
     note: "Reviews mention a vocal-enhance transparency mode; not a named opcode in the public table.",
   },
-  gameMode: { state: "supported", protocol: "0x09 LowLatency" },
-  autoGameMode: { state: "supported", note: "Host-side, no extra BLE traffic while idle" },
-  deviceEq: { state: "supported", protocol: "0x22 / char 0000000B" },
-  systemEq: { state: "supported", note: "Host PipeWire-style EQ — never written to the buds" },
-  eqPresets: { state: "supported", note: "Community band tables written via 0x22" },
-  eqCustom: { state: "supported", protocol: "0x22" },
-  eqPerChannel: { state: "experimental", protocol: "0x46 / 0x47" },
-  touchControls: { state: "supported", protocol: "0x2B / char 0000000D" },
-  wearDetection: { state: "supported", protocol: "0x06 / 0x2C" },
-  wearAutoPause: { state: "supported", protocol: "0x2C musicIndex" },
-  sleepMode: { state: "supported", protocol: "0x10" },
+  gameMode: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x09 LowLatency",
+    opcode: 0x09,
+  },
+  autoGameMode: {
+    hardware: "unknown",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "Host-side automation; no process/player observer yet (pending #13). No BLE traffic while idle.",
+  },
+  deviceEq: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x22 / char 0000000B",
+    opcode: 0x22,
+  },
+  systemEq: {
+    hardware: "unknown",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "Host PipeWire-style EQ; not implemented yet (pending #13). Never written to the buds.",
+  },
+  eqPresets: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "Community band tables written via 0x22",
+    opcode: 0x22,
+  },
+  eqCustom: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x22",
+    opcode: 0x22,
+  },
+  eqPerChannel: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "0x46 / 0x47 catalog-only; not enabled.",
+    opcode: 0x46,
+  },
+  touchControls: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "char 0000000D key function V2 (no frame)",
+  },
+  wearDetection: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x06 / 0x2C",
+    opcode: 0x2c,
+  },
+  wearAutoPause: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x2C musicIndex",
+    opcode: 0x2c,
+  },
+  sleepMode: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x10",
+    opcode: 0x10,
+  },
   spatialAudio: {
-    state: "experimental",
-    protocol: "0x2D",
-    note: "Opcode exists; HT08 firmware exposure is unverified.",
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "experimental",
+    note: "Opcode 0x2D documented; HT08 firmware exposure unverified.",
+    opcode: 0x2d,
   },
   multipointStatus: {
-    state: "unknown",
+    hardware: "unknown",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
     note: "A2DP/HFP multipoint is a Bluetooth stack property, not a documented QCY command.",
   },
   multipointControl: {
-    state: "requires-protocol-research",
+    hardware: "unknown",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
     note: "No public enable/disable or host-list command.",
   },
-  findChime: { state: "supported", protocol: "0x05 LightFlash / 0x3D TonePlay" },
-  findRssi: { state: "supported", note: "Smoothed host RSSI proximity, not GPS" },
-  findGps: { state: "unsupported", note: "HT08 has no GPS" },
+  findChime: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x05 LightFlash / 0x3D TonePlay; interactive preflight required (#9).",
+    opcode: 0x3d,
+  },
+  findRssi: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "implemented",
+    write: "read-only",
+    note: "Smoothed host RSSI proximity, not GPS.",
+  },
+  findGps: {
+    hardware: "unsupported",
+    protocol: "unsupported",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "HT08 has no GPS.",
+  },
   ldacToggle: {
-    state: "experimental",
-    protocol: "0x23",
-    note: "On Linux, codec is usually selected by PipeWire/BlueZ, not the earbud opcode.",
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "experimental",
+    note: "0x23; on Linux the codec is usually selected by PipeWire/BlueZ, not the earbud opcode.",
+    opcode: 0x23,
   },
   ldacBitrate: {
-    state: "unsupported",
+    hardware: "unsupported",
+    protocol: "unsupported",
+    implementation: "not-implemented",
+    write: "read-only",
     note: "BlueZ/PipeWire do not reliably expose LDAC bitrate. Never invented.",
   },
-  codecStatus: { state: "supported", note: "Read from host audio graph when available; mocked here" },
-  rename: { state: "supported", protocol: "0x18" },
-  firmwareOta: {
-    state: "unsupported",
-    note: "Firmware update: not yet safely supported. No flash/OTA path will be sent.",
+  codecStatus: {
+    hardware: "unknown",
+    protocol: "unknown",
+    implementation: "mock-only",
+    write: "read-only",
+    note: "Read from the host audio graph when available; currently mocked (pending #13).",
   },
-  inEarSensitivity: { state: "experimental", protocol: "0x48" },
-  soundBalance: { state: "supported", protocol: "0x16" },
-  earTipFit: { state: "experimental", protocol: "0x11" },
+  rename: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "0x18 catalog-only; not in the trusted table and no app action yet.",
+    opcode: 0x18,
+  },
+  firmwareOta: {
+    hardware: "unsupported",
+    protocol: "unsupported",
+    implementation: "not-implemented",
+    write: "forbidden",
+    note: "Firmware update not yet safely supported. No flash/OTA path will be sent.",
+  },
+  inEarSensitivity: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "0x48 catalog-only; not enabled.",
+    opcode: 0x48,
+  },
+  soundBalance: {
+    hardware: "supported",
+    protocol: "supported",
+    implementation: "implemented",
+    write: "writable",
+    note: "0x16",
+    opcode: 0x16,
+  },
+  earTipFit: {
+    hardware: "supported",
+    protocol: "unknown",
+    implementation: "not-implemented",
+    write: "read-only",
+    note: "0x11 catalog-only; not enabled.",
+    opcode: 0x11,
+  },
 };
 
-export function isShown(flag: FeatureFlag): boolean {
-  return flag.state === "supported" || flag.state === "experimental";
+/** Show a capability unless both hardware and protocol say it does not exist. */
+export function isShown(cap: CapabilityTruth): boolean {
+  return !(cap.hardware === "unsupported" && cap.protocol === "unsupported");
 }
 
-export function isWritable(flag: FeatureFlag): boolean {
-  return flag.state === "supported" || flag.state === "experimental";
+/** Implemented in this build (not mock-only, not pending). */
+export function isImplemented(cap: CapabilityTruth): boolean {
+  return cap.implementation === "implemented";
+}
+
+/** A supported write the app implements. */
+export function isWritable(cap: CapabilityTruth): boolean {
+  return isImplemented(cap) && cap.write === "writable";
+}
+
+/** An experimental write the app implements (needs the session opt-in). */
+export function isExperimentalWrite(cap: CapabilityTruth): boolean {
+  return isImplemented(cap) && cap.write === "experimental";
+}
+
+/** The UI may offer interaction: implemented and either writable or experimental. */
+export function canInteract(cap: CapabilityTruth): boolean {
+  return isImplemented(cap) && (cap.write === "writable" || cap.write === "experimental");
+}
+
+export type CapabilitySummary = {
+  label: string;
+  tone: "supported" | "experimental" | "neutral" | "unknown" | "research" | "danger";
+};
+
+/** Honest one-line summary for chips/UI, derived from the four truths. */
+export function summarizeCapability(cap: CapabilityTruth): CapabilitySummary {
+  if (cap.write === "forbidden") return { label: "Forbidden", tone: "danger" };
+  if (cap.implementation === "implemented") {
+    if (cap.write === "experimental") return { label: "Experimental", tone: "experimental" };
+    if (cap.write === "writable") return { label: "Supported", tone: "supported" };
+    return { label: "Read-only", tone: "supported" };
+  }
+  if (cap.implementation === "mock-only") return { label: "Mock only", tone: "neutral" };
+  // not-implemented below here
+  if (cap.protocol === "supported") return { label: "Protocol known \u00b7 app pending", tone: "neutral" };
+  if (cap.hardware === "unsupported" && cap.protocol === "unsupported") {
+    return { label: "Unsupported", tone: "neutral" };
+  }
+  if (cap.hardware === "supported") {
+    return { label: "Needs protocol research", tone: "research" };
+  }
+  return { label: "Unknown", tone: "unknown" };
 }

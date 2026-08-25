@@ -1,27 +1,25 @@
-import type { CapabilityState } from "@/lib/qcy/protocol/types";
+import { summarizeCapability, type CapabilityTruth } from "@/lib/qcy/device/capabilities";
 import { cn } from "@/lib/utils";
 
-const LABELS: Record<CapabilityState, string> = {
-  supported: "Supported",
-  unsupported: "Unsupported",
-  experimental: "Experimental",
-  unknown: "Unknown",
-  "requires-protocol-research": "Needs research",
-};
-
-export function CapabilityChip({ state }: { state: CapabilityState }) {
+/**
+ * Renders an honest one-line summary of a capability's four truths
+ * (hardware / protocol / implementation / write). See capabilities.ts.
+ */
+export function CapabilityChip({ cap }: { cap: CapabilityTruth }) {
+  const { label, tone } = summarizeCapability(cap);
   return (
     <span
       className={cn(
         "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-        state === "supported" && "bg-accent/15 text-accent",
-        state === "experimental" && "bg-warn/15 text-warn",
-        state === "unsupported" && "bg-bg-hover text-fg-subtle",
-        state === "unknown" && "bg-bg-hover text-fg-muted",
-        state === "requires-protocol-research" && "bg-danger/10 text-danger",
+        tone === "supported" && "bg-accent/15 text-accent",
+        tone === "experimental" && "bg-warn/15 text-warn",
+        tone === "neutral" && "bg-bg-hover text-fg-subtle",
+        tone === "unknown" && "bg-bg-hover text-fg-muted",
+        tone === "research" && "bg-danger/10 text-danger",
+        tone === "danger" && "bg-danger/15 text-danger",
       )}
     >
-      {LABELS[state]}
+      {label}
     </span>
   );
 }

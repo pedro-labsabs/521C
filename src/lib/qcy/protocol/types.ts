@@ -1,12 +1,5 @@
 export const SOF = 0xff;
 
-export type CapabilityState =
-  | "supported"
-  | "unsupported"
-  | "experimental"
-  | "unknown"
-  | "requires-protocol-research";
-
 export type CmdId = number;
 
 export const Cmd = {

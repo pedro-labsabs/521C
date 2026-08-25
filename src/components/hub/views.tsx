@@ -17,7 +17,7 @@ import { EarbudsStage } from "@/components/hub/earbuds";
 import { CapabilityChip } from "@/components/hub/capability-chip";
 import { Panel, Segmented, Toggle } from "@/components/hub/panel";
 import { DEVICE_EQ_PRESETS, EQ_FREQS, eqGains } from "@/lib/qcy/eq-presets";
-import { HT08_CAPABILITIES } from "@/lib/qcy/device/capabilities";
+import { HT08_CAPABILITIES, canInteract } from "@/lib/qcy/device/capabilities";
 import { CHAR, FUN_LABELS, KEY_LABELS, SERVICE, cmdName } from "@/lib/qcy/protocol";
 import { BUILTIN_PROFILES, type NoiseUiMode } from "@/lib/qcy/smart-profiles";
 import { currentNoiseUi, useHub } from "@/lib/qcy/hub-store";
@@ -144,7 +144,7 @@ export function NoiseView() {
             <button
               key={id}
               type="button"
-              disabled={flag.state !== "supported" && flag.state !== "experimental"}
+              disabled={!canInteract(flag)}
               onClick={() => void setNoise(id)}
               className={cn(
                 "flex items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm",
@@ -152,7 +152,7 @@ export function NoiseView() {
               )}
             >
               <span className="font-medium">{label}</span>
-              <CapabilityChip state={flag.state} />
+              <CapabilityChip cap={flag} />
             </button>
           ))}
         </div>
@@ -551,9 +551,9 @@ export function AdvancedView() {
             <div key={key} className="flex items-start justify-between gap-3 rounded-md bg-bg px-3 py-2">
               <div>
                 <div className="text-sm font-medium">{key}</div>
-                <div className="text-xs text-fg-muted">{flag.protocol ?? flag.note ?? "—"}</div>
+                <div className="text-xs text-fg-muted">{flag.note ?? "—"}</div>
               </div>
-              <CapabilityChip state={flag.state} />
+              <CapabilityChip cap={flag} />
             </div>
           ))}
         </div>
