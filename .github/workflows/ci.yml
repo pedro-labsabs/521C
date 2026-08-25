@@ -32,6 +32,8 @@ jobs:
         run: npm run lint
       - name: Build
         run: npm run build
+      - name: Network audit (no third-party runtime requests)
+        run: npm run audit:network
 
   native:
     name: Native · Rust stable

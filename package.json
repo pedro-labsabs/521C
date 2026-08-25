@@ -7,9 +7,11 @@
     "nf3": "0.3.17"
   },
   "scripts": {
-    "dev": "vite dev --host 0.0.0.0 --port 8080",
+    "dev": "vite dev --port 8080",
+    "dev:lan": "vite dev --host 0.0.0.0 --port 8080",
     "build": "vite build",
     "preview": "vite preview",
+    "audit:network": "node scripts/audit-network.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint .",

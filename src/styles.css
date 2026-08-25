@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Manrope", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Local-first: system font stack only. No web fonts are fetched at runtime (issue #12). */
+  --font-sans: system-ui, "Segoe UI", "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace;
 
   --color-bg: #101214;
   --color-bg-elevated: #171a1c;
