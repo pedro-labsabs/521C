@@ -3,6 +3,10 @@
 dev:
     npm run dev
 
+# Run the native CLI (mock by default). Extra args pass through, e.g. `just ctl --bluez scan`.
+ctl *args:
+    cd native && cargo run -q -p five21cctl --bin 521cctl -- {{args}}
+
 test:
     npm test
     cd native && cargo test --workspace

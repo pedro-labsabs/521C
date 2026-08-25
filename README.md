@@ -127,16 +127,31 @@ cargo test --workspace
 cargo run -p five21cctl -- status
 ```
 
-Examples:
+Examples (mock transport is the deliberate default — no hardware needed):
 
 ```bash
+521cctl scan
 521cctl status
 521cctl battery
-521cctl anc adaptive
+521cctl anc transparency
 521cctl game-mode on
 ```
 
-The current native CLI uses a mock HT08 transport. Real BlueZ/GATT integration belongs behind the transport boundary and must preserve the protocol safety rules. Issue #7 tracks the primary native transport.
+Operate a real device through the system BlueZ stack by passing `--bluez` and
+selecting the target explicitly:
+
+```bash
+521cctl --bluez scan
+521cctl --bluez --device F8:5C:7D:12:08:08 status
+521cctl --bluez --device F8:5C:7D:12:08:08 anc transparency
+```
+
+The native transport lives in `native/crates/qcy-transport`: a single `Transport`
+trait with a deterministic mock backend and a BlueZ/D-Bus backend. Every outbound
+write passes the central write-authorization policy first — destructive opcodes are
+never sent, unknown models stay read-only, and experimental opcodes need a session
+opt-in. Discovery only surfaces candidate QCY devices and preserves unknown-model
+status; it never invents capabilities.
 
 ## Protocol
 

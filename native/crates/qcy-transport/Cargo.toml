@@ -1,0 +1,17 @@
+[package]
+name = "qcy-transport"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Transport abstraction + BlueZ/mock backends for QCY BLE device I/O"
+publish = false
+
+[features]
+# The real BlueZ/D-Bus backend. The trait, object mapping, policy and mock are always
+# built and tested; enabling this feature pulls in zbus for live system Bluetooth.
+default = ["bluez"]
+bluez = ["dep:zbus"]
+
+[dependencies]
+qcy-protocol = { path = "../qcy-protocol" }
+zbus = { version = "5", optional = true }

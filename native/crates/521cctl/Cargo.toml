@@ -13,3 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 qcy-protocol = { path = "../qcy-protocol" }
+qcy-transport = { path = "../qcy-transport", default-features = false }
+
+[features]
+default = ["bluez"]
+bluez = ["qcy-transport/bluez"]
