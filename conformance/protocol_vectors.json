@@ -1,0 +1,332 @@
+{
+  "version": 1,
+  "provenance": "Derived from docs/PROTOCOL.md (independent reverse-engineering notes) and the pre-existing in-repo test fixtures. No guessed bytes: every vector is either a documented frame, a boundary construction of the documented framing rules, or a rejection case. See conformance/README.md.",
+  "frame": {
+    "sof": "0xff",
+    "maxPacket": 512,
+    "layout": "[0xFF][body_len][cmd][param_len][params...]...; body_len = total length - 2"
+  },
+  "decode": [
+    {
+      "name": "battery-request",
+      "hex": "ff03fe012f",
+      "expect": {
+        "ok": true,
+        "blocks": [
+          {
+            "cmd": 254,
+            "paramsHex": "2f"
+          }
+        ]
+      },
+      "note": "RequestData(0xFE) asking Battery(0x2F)."
+    },
+    {
+      "name": "anc-indoor-level2",
+      "hex": "ff051703020250",
+      "expect": {
+        "ok": true,
+        "blocks": [
+          {
+            "cmd": 23,
+            "paramsHex": "020250"
+          }
+        ]
+      },
+      "note": "AncSetting scene mode=0x02 sub=0x02 noiseValue=80."
+    },
+    {
+      "name": "multi-block",
+      "hex": "ff082f0352505e090101",
+      "expect": {
+        "ok": true,
+        "blocks": [
+          {
+            "cmd": 47,
+            "paramsHex": "52505e"
+          },
+          {
+            "cmd": 9,
+            "paramsHex": "01"
+          }
+        ]
+      },
+      "note": "Two blocks share one packet."
+    },
+    {
+      "name": "empty-block",
+      "hex": "ff022f00",
+      "expect": {
+        "ok": true,
+        "blocks": [
+          {
+            "cmd": 47,
+            "paramsHex": ""
+          }
+        ]
+      },
+      "note": "Command block with zero param bytes."
+    },
+    {
+      "name": "empty-body",
+      "hex": "ff00",
+      "expect": {
+        "ok": true,
+        "blocks": []
+      },
+      "note": "Valid frame carrying no blocks."
+    },
+    {
+      "name": "bad-sof",
+      "hex": "000100",
+      "expect": {
+        "ok": false,
+        "error": "bad-sof"
+      }
+    },
+    {
+      "name": "length-mismatch",
+      "hex": "ff1001",
+      "expect": {
+        "ok": false,
+        "error": "length-mismatch"
+      },
+      "note": "body_len=16 but only 1 body byte present."
+    },
+    {
+      "name": "truncated-block-params",
+      "hex": "ff032f0500",
+      "expect": {
+        "ok": false,
+        "error": "truncated-block"
+      },
+      "note": "Block claims 5 param bytes, only 1 present."
+    },
+    {
+      "name": "truncated-block-header",
+      "hex": "ff012f",
+      "expect": {
+        "ok": false,
+        "error": "truncated-block"
+      },
+      "note": "Only one header byte present for a block."
+    },
+    {
+      "name": "too-short-single-byte",
+      "hex": "ff",
+      "expect": {
+        "ok": false,
+        "error": "too-short"
+      }
+    },
+    {
+      "name": "too-short-empty",
+      "hex": "",
+      "expect": {
+        "ok": false,
+        "error": "too-short"
+      }
+    }
+  ],
+  "encode": [
+    {
+      "name": "battery-request",
+      "blocks": [
+        {
+          "cmd": 254,
+          "paramsHex": "2f"
+        }
+      ],
+      "expectHex": "ff03fe012f"
+    },
+    {
+      "name": "anc-indoor-level2",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "020250"
+        }
+      ],
+      "expectHex": "ff051703020250"
+    },
+    {
+      "name": "multi-block",
+      "blocks": [
+        {
+          "cmd": 47,
+          "paramsHex": "52505e"
+        },
+        {
+          "cmd": 9,
+          "paramsHex": "01"
+        }
+      ],
+      "expectHex": "ff082f0352505e090101"
+    },
+    {
+      "name": "empty-block",
+      "blocks": [
+        {
+          "cmd": 47,
+          "paramsHex": ""
+        }
+      ],
+      "expectHex": "ff022f00"
+    }
+  ],
+  "advertisement": [
+    {
+      "name": "scrambled-control-mac",
+      "companyId": 21020,
+      "dataHex": "123400000050c65a000000bbaaccffeedd00000000000000",
+      "expect": {
+        "vendorId": 4660,
+        "battery": {
+          "left": {
+            "level": 80,
+            "charging": false
+          },
+          "right": {
+            "level": 70,
+            "charging": true
+          },
+          "case": {
+            "level": 90,
+            "charging": false
+          }
+        },
+        "controlMac": "AA:BB:CC:DD:EE:FF",
+        "otherMac": "AA:BB:CC:DD:EE:FF"
+      },
+      "note": "otherMac bytes are zero so it falls back to controlMac."
+    },
+    {
+      "name": "dual-mac-and-battery-clamp",
+      "companyId": 21020,
+      "dataHex": "abcd00000064b27f0000000c0a0b0f0e0d00221133665544",
+      "expect": {
+        "vendorId": 43981,
+        "battery": {
+          "left": {
+            "level": 100,
+            "charging": false
+          },
+          "right": {
+            "level": 50,
+            "charging": true
+          },
+          "case": {
+            "level": 100,
+            "charging": false
+          }
+        },
+        "controlMac": "0A:0C:0B:0D:0E:0F",
+        "otherMac": "11:22:33:44:55:66"
+      },
+      "note": "case byte 0x7F (127) clamps to level 100; verifies otherMac scramble order [19,18,20,23,22,21]."
+    },
+    {
+      "name": "wrong-company-id",
+      "companyId": 76,
+      "dataHex": "000000000000000000000000000000000000000000000000",
+      "expect": null
+    },
+    {
+      "name": "too-short",
+      "companyId": 21020,
+      "dataHex": "12340000",
+      "expect": null
+    }
+  ],
+  "battery": [
+    {
+      "name": "normal",
+      "hex": "52505e",
+      "expect": {
+        "left": {
+          "level": 82,
+          "charging": false
+        },
+        "right": {
+          "level": 80,
+          "charging": false
+        },
+        "case": {
+          "level": 94,
+          "charging": false
+        }
+      }
+    },
+    {
+      "name": "charging",
+      "hex": "d2c8de",
+      "expect": {
+        "left": {
+          "level": 82,
+          "charging": true
+        },
+        "right": {
+          "level": 72,
+          "charging": true
+        },
+        "case": {
+          "level": 94,
+          "charging": true
+        }
+      },
+      "note": "bit7 set on all three cells."
+    },
+    {
+      "name": "clamp-127-to-100",
+      "hex": "7fff64",
+      "expect": {
+        "left": {
+          "level": 100,
+          "charging": false
+        },
+        "right": {
+          "level": 100,
+          "charging": true
+        },
+        "case": {
+          "level": 100,
+          "charging": false
+        }
+      },
+      "note": "level bits >100 clamp to 100."
+    },
+    {
+      "name": "too-short",
+      "hex": "5250",
+      "expect": null
+    }
+  ],
+  "firmware": {
+    "consumers": [
+      "typescript"
+    ],
+    "note": "Only the TS surface parses firmware bytes today; Rust core does not. Kept in the corpus for completeness.",
+    "vectors": [
+      {
+        "name": "six-bytes",
+        "hex": "010402010402",
+        "expect": {
+          "left": "1.4.2",
+          "right": "1.4.2"
+        }
+      },
+      {
+        "name": "three-bytes",
+        "hex": "010402",
+        "expect": {
+          "left": "1.4.2"
+        }
+      },
+      {
+        "name": "too-short",
+        "hex": "0104",
+        "expect": null
+      }
+    ]
+  }
+}

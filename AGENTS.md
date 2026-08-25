@@ -49,8 +49,10 @@ Marketing or behavior in the official mobile app does not prove that a Linux-acc
 - `native/crates/qcy-protocol/` — Rust protocol core.
 - `native/crates/521cctl/` — native CLI.
 - `docs/` — protocol, architecture, device support, development, product and safety documentation.
-- `scripts/` — focused repository checks.
+- `conformance/` — shared byte-level protocol vectors consumed by both the TypeScript and Rust test suites.
 - `src/routeTree.gen.ts` — generated; do not hand-edit in ordinary work.
+
+Tests are colocated with the code they exercise (`src/**/*.test.ts` via vitest, `native/**/tests/*.rs`); they import production modules rather than re-implementing them.
 
 As the native application grows, preserve equivalent boundaries between UI, application/orchestration, device/profile truth, protocol codecs, transport, and Linux host services.
 

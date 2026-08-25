@@ -55,13 +55,31 @@ Or, with `just` installed:
 just check
 ```
 
+## Testing
+
+`npm test` runs [vitest](https://vitest.dev) over `src/**/*.test.ts`. Tests are
+colocated with the production code they exercise and import the real modules —
+there are no re-implemented "shadow" helpers. A standalone `vitest.config.ts`
+keeps protocol/state tests in plain Node without loading the TanStack Start
+build plugins.
+
+Byte-level protocol behavior is pinned by a **shared conformance corpus** at
+`conformance/protocol_vectors.json`, consumed by both implementations:
+
+- TypeScript: `src/lib/qcy/protocol/conformance.test.ts`
+- Rust: `native/crates/qcy-protocol/tests/conformance.rs`
+
+A cross-language semantic divergence covered by a vector fails at least one
+gate. See `conformance/README.md` for the schema, provenance rules, and how to
+add a vector.
+
 ## Protocol work
 
 Protocol changes need evidence. Prefer captured packets, reproducible traces, public documentation, or hardware verification. Record uncertainty explicitly instead of turning assumptions into supported capabilities.
 
 When adding or changing a write path:
 
-1. Add or update a parser/codec fixture first.
+1. Add or update a conformance vector in `conformance/protocol_vectors.json` first (fixture before codec/write change).
 2. Validate input length and range.
 3. Keep raw GATT bytes below the UI/state boundary.
 4. Update `docs/PROTOCOL.md` and `docs/SUPPORTED_DEVICES.md` if capability semantics changed.
