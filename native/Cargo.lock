@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "521cctl"
+name = "five21cctl"
 version = "0.1.0"
 dependencies = [
  "qcy-protocol",

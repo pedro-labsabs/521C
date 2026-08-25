@@ -93,20 +93,21 @@ The current React/TanStack surface remains useful for mock development, behavior
 Requirements: Node.js 22+ and npm.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-Validation:
+Validation (also enforced by GitHub Actions on every push/PR):
 
 ```bash
+npm ci
 npm test
 npm run typecheck
 npm run lint
 npm run build
 ```
 
-Issue #5 tracks reproducible npm locking and automated CI; once implemented, clean setup should use `npm ci`.
+`package-lock.json` is committed; use `npm ci` for clean, reproducible setup and reserve `npm install` for intentional dependency changes.
 
 ## Native core / CLI
 
@@ -115,7 +116,7 @@ Requirements: stable Rust toolchain.
 ```bash
 cd native
 cargo test --workspace
-cargo run -p 521cctl -- status
+cargo run -p five21cctl -- status
 ```
 
 Examples:

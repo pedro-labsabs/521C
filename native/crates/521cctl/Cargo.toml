@@ -1,9 +1,15 @@
 [package]
-name = "521cctl"
+# Cargo package names cannot start with a digit, so the crate is `five21cctl`
+# while the installed CLI binary keeps the contracted name `521cctl`.
+name = "five21cctl"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
+
+[[bin]]
+name = "521cctl"
+path = "src/main.rs"
 
 [dependencies]
 qcy-protocol = { path = "../qcy-protocol" }
