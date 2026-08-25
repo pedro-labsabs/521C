@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { CHAR, DESTRUCTIVE_CMDS, encodeKeyFunctionDirect, set } from "./protocol";
 import { WriteDeniedError } from "./policy";
+import {
+  CHIME_COOLDOWN_MS,
+  chimeToneId,
+  evaluateChimePreflight,
+  type ChimePreflight,
+  type ChimeSide,
+} from "./find-preflight";
 import type { AncScene, KeyBinding } from "./protocol/types";
 import { DEVICE_EQ_PRESETS, type NamedEq, presetFromGains } from "./eq-presets";
 import { BUILTIN_PROFILES, type NoiseUiMode, type SmartProfile } from "./smart-profiles";
@@ -97,6 +104,10 @@ export type HubState = {
   minimized: boolean;
   /** Session-scoped opt-in for experimental device writes. Never persisted. */
   experimentalOptIn: boolean;
+  /** Pending Find-Earbuds chime awaiting interactive confirmation. No TX until confirmed. */
+  pendingChime: ChimePreflight | null;
+  /** Epoch ms before which another chime is refused (rate limit). */
+  chimeBlockedUntil: number;
 };
 
 export type HubActions = {
@@ -115,7 +126,12 @@ export type HubActions = {
   setEqGains: (gains: number[], name?: string) => Promise<void>;
   setBinding: (keyId: number, funId: number) => Promise<void>;
   setSoundBalance: (value: number) => Promise<void>;
-  findChime: (side: "left" | "right" | "both") => Promise<void>;
+  /** Compute the chime preflight and stage it for confirmation. Never transmits. */
+  requestChime: (side: ChimeSide) => void;
+  /** Dismiss a staged chime without transmitting. */
+  cancelChime: () => void;
+  /** Transmit the staged chime only after confirmation passes all safety gates. */
+  confirmChime: () => Promise<void>;
   applyProfile: (id: string) => Promise<void>;
   saveCustomProfile: (profile: SmartProfile) => void;
   media: (action: "play" | "pause" | "prev" | "next") => Promise<void>;
@@ -240,6 +256,8 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   cliHistory: ["521C CLI — type help"],
   minimized: false,
   experimentalOptIn: false,
+  pendingChime: null,
+  chimeBlockedUntil: 0,
 
   setView: (view) => setState({ view }),
   setTheme: (theme) => {
@@ -399,17 +417,52 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   setSoundBalance: async (value) => {
     await guard(() => transport.write(set.soundBalance(value)));
   },
-  findChime: async (side) => {
+  requestChime: (side) => {
+    // Preflight only: stage the decision for interactive confirmation. No TX here.
+    const d = get().device;
+    const preflight = evaluateChimePreflight(side, {
+      detectionEnabled: d.wear.enabled,
+      wornLeft: d.wornLeft,
+      wornRight: d.wornRight,
+    });
+    setState({ pendingChime: preflight });
+  },
+  cancelChime: () => setState({ pendingChime: null }),
+  confirmChime: async () => {
+    const pre = get().pendingChime;
+    if (!pre) return;
+    // Known-worn targets are blocked by default; confirmation cannot override them.
+    if (pre.status === "blocked-worn") {
+      setState({
+        toast: { id: toastSeq++, title: "Chime blocked", body: pre.reason },
+      });
+      return;
+    }
+    if (!get().device.connected) {
+      setState({
+        toast: { id: toastSeq++, title: "Not connected", body: "Connect to the earbuds before using Find." },
+      });
+      return;
+    }
+    const now = Date.now();
+    if (now < get().chimeBlockedUntil) {
+      setState({
+        toast: { id: toastSeq++, title: "Chime cooldown", body: "Wait a few seconds before chiming again." },
+      });
+      return;
+    }
     const ok = await guard(async () => {
       await transport.write(set.lightFlash(true));
-      await transport.write(set.tonePlay(side === "left" ? 1 : side === "right" ? 2 : 3));
+      await transport.write(set.tonePlay(chimeToneId(pre.side)));
     });
     if (!ok) return;
     setState({
+      pendingChime: null,
+      chimeBlockedUntil: now + CHIME_COOLDOWN_MS,
       toast: {
         id: toastSeq++,
         title: "Find earbuds",
-        body: "Playing a locator tone. Do not run this at high volume while wearing the buds.",
+        body: "Playing a locator tone. Keep the volume safe.",
       },
     });
   },
@@ -561,8 +614,9 @@ async function runCliLine(line: string, get: () => HubState & HubActions): Promi
       }
       return DEVICE_EQ_PRESETS.map((e) => e.id).join(" ");
     case "find":
-      await a.findChime((parts[1] as "left" | "right" | "both") ?? "both");
-      return "chime sent";
+      // Audible locator actions are intentionally unavailable through the unattended
+      // CLI/automation path (issue #9). They require interactive confirmation in the UI.
+      return "refused: chime requires interactive confirmation in the Find view";
     case "sleep":
       await a.setSleep(parts[1] !== "off");
       return `sleep ${parts[1] !== "off" ? "on" : "off"}`;
