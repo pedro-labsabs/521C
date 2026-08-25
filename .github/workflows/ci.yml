@@ -49,9 +49,49 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
+      - name: Install Slint build/runtime libraries
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev xvfb
       - name: Cargo tests
         run: cargo test --workspace
       - name: Cargo fmt
         run: cargo fmt --check
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Desktop launch self-test (mock transport, virtual display)
+        run: xvfb-run -a cargo run -q -p five21c-desktop --bin 521c -- --mock --self-test
+
+  desktop-package:
+    name: Desktop · AppImage artifact
+    runs-on: ubuntu-24.04
+    needs: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Install build/runtime libraries
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev xvfb
+      - name: Install appimagetool (official AppImage release tooling)
+        run: |
+          curl -sSL -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          /tmp/appimagetool --version
+      - name: Build AppImage
+        run: APPIMAGETOOL=/tmp/appimagetool scripts/package-appimage.sh
+      - name: Launch-test the packaged AppImage (mock, virtual display)
+        run: |
+          APPIMAGE="$(ls native/dist/521C-*.AppImage)"
+          xvfb-run -a "$APPIMAGE" --appimage-extract-and-run --mock --self-test
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 521c-appimage
+          path: native/dist/521C-*.AppImage

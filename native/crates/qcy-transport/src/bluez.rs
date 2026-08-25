@@ -47,7 +47,7 @@ pub struct BlueZObject {
 
 /// Minimal D-Bus surface the BlueZ backend needs. Implemented for real by
 /// [`ZbusBlueZBus`] and faked in unit tests.
-pub trait BlueZBus {
+pub trait BlueZBus: Send {
     fn managed_objects(&self) -> Result<Vec<BlueZObject>, TransportError>;
     fn start_discovery(&self, adapter: &str) -> Result<(), TransportError>;
     fn device_connect(&self, device_path: &str) -> Result<(), TransportError>;
@@ -79,6 +79,10 @@ pub struct BlueZTransport {
     device_path: Option<String>,
     /// Resolved characteristic UUID (lowercase) -> object path.
     chars: HashMap<String, String>,
+    /// Model evidence for the connected device, resolved at connect time from the
+    /// device's advertised name. Unknown models stay read-only: writes are denied
+    /// even though the configured policy is the HT08 one.
+    connected_model_known: bool,
 }
 
 impl BlueZTransport {
@@ -90,16 +94,13 @@ impl BlueZTransport {
             adapter: "hci0".to_string(),
             device_path: None,
             chars: HashMap::new(),
+            connected_model_known: false,
         }
     }
 
     pub fn with_adapter(mut self, adapter: impl Into<String>) -> Self {
         self.adapter = adapter.into();
         self
-    }
-
-    pub fn set_experimental_opt_in(&mut self, on: bool) {
-        self.experimental_opt_in = on;
     }
 
     fn prop_str<'a>(obj: &'a BlueZObject, iface: &str, key: &str) -> Option<&'a str> {
@@ -154,6 +155,24 @@ impl BlueZTransport {
         Ok(())
     }
 
+    /// Model evidence for a connected device path: the device object's Alias/Name
+    /// must prove the model (HT08 name fragments). Anything else stays unknown and
+    /// therefore read-only. Absent evidence never upgrades to known.
+    fn device_model_known(&self, path: &str) -> bool {
+        let objects = match self.bus.managed_objects() {
+            Ok(objects) => objects,
+            Err(_) => return false,
+        };
+        objects
+            .iter()
+            .find(|obj| obj.path == path)
+            .and_then(|obj| {
+                Self::prop_str(obj, DEVICE_IFACE, "Alias")
+                    .or_else(|| Self::prop_str(obj, DEVICE_IFACE, "Name"))
+            })
+            .is_some_and(Self::is_known_model)
+    }
+
     fn char_path(&self, char_uuid: &str) -> Result<String, TransportError> {
         self.chars
             .get(&char_uuid.to_ascii_lowercase())
@@ -195,7 +214,8 @@ impl Transport for BlueZTransport {
     fn connect(&mut self, address: &str) -> Result<(), TransportError> {
         let path = device_path(&self.adapter, address);
         self.bus.device_connect(&path)?;
-        self.device_path = Some(path);
+        self.device_path = Some(path.clone());
+        self.connected_model_known = self.device_model_known(&path);
         self.resolve_chars()?;
         Ok(())
     }
@@ -203,6 +223,7 @@ impl Transport for BlueZTransport {
     fn disconnect(&mut self) -> Result<(), TransportError> {
         if let Some(path) = self.device_path.take() {
             self.chars.clear();
+            self.connected_model_known = false;
             self.bus.device_disconnect(&path)?;
         }
         Ok(())
@@ -214,6 +235,11 @@ impl Transport for BlueZTransport {
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        if !self.connected_model_known {
+            return Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice,
+            ));
+        }
         self.policy
             .authorize_frame(bytes, self.experimental_opt_in)
             .map_err(TransportError::Denied)?;
@@ -222,6 +248,11 @@ impl Transport for BlueZTransport {
     }
 
     fn write_direct(&mut self, char_uuid: &str, bytes: &[u8]) -> Result<(), TransportError> {
+        if !self.connected_model_known {
+            return Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice,
+            ));
+        }
         self.policy
             .authorize_direct(char_uuid, bytes, self.experimental_opt_in)
             .map_err(TransportError::Denied)?;
@@ -232,6 +263,10 @@ impl Transport for BlueZTransport {
     fn subscribe(&mut self, char_uuid: &str) -> Result<(), TransportError> {
         let path = self.char_path(char_uuid)?;
         self.bus.start_notify(&path)
+    }
+
+    fn set_experimental_opt_in(&mut self, on: bool) {
+        self.experimental_opt_in = on;
     }
 }
 
@@ -399,16 +434,16 @@ mod tests {
     use super::*;
     use qcy_protocol::packet::encode_command;
     use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    type WriteLog = Rc<RefCell<Vec<(String, Vec<u8>)>>>;
+    type WriteLog = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
     #[derive(Default)]
     struct FakeBus {
         objects: Vec<BlueZObject>,
         connected: RefCell<bool>,
         writes: WriteLog,
-        notifies: Rc<RefCell<Vec<String>>>,
+        notifies: Arc<Mutex<Vec<String>>>,
         fail_connect: bool,
     }
 
@@ -491,12 +526,16 @@ mod tests {
         }
         fn write_value(&self, char_path: &str, bytes: &[u8]) -> Result<(), TransportError> {
             self.writes
-                .borrow_mut()
+                .lock()
+                .expect("writes mutex")
                 .push((char_path.to_string(), bytes.to_vec()));
             Ok(())
         }
         fn start_notify(&self, char_path: &str) -> Result<(), TransportError> {
-            self.notifies.borrow_mut().push(char_path.to_string());
+            self.notifies
+                .lock()
+                .expect("notifies mutex")
+                .push(char_path.to_string());
             Ok(())
         }
         fn stop_notify(&self, _p: &str) -> Result<(), TransportError> {
@@ -505,7 +544,7 @@ mod tests {
     }
 
     fn transport(objects: Vec<BlueZObject>) -> (BlueZTransport, WriteLog) {
-        let writes = Rc::new(RefCell::new(Vec::new()));
+        let writes = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
             objects,
             writes: writes.clone(),
@@ -560,7 +599,7 @@ mod tests {
         t.connect("F8:5C:7D:12:08:08").unwrap();
         let frame = encode_command(0x09, &[0x01]).unwrap();
         t.write(&frame).unwrap();
-        let w = writes.borrow();
+        let w = writes.lock().expect("writes mutex");
         assert_eq!(w.len(), 1);
         assert!(w[0].0.ends_with("char0001"));
     }
@@ -579,7 +618,7 @@ mod tests {
         t.connect("F8:5C:7D:12:08:08").unwrap();
         let frame = encode_command(0x01, &[]).unwrap();
         assert!(matches!(t.write(&frame), Err(TransportError::Denied(_))));
-        assert!(writes.borrow().is_empty());
+        assert!(writes.lock().expect("writes mutex").is_empty());
     }
 
     #[test]
@@ -587,6 +626,73 @@ mod tests {
         let (mut t, _) = transport(ht08_fixture());
         t.connect("F8:5C:7D:12:08:08").unwrap();
         t.subscribe(crate::policy::CHAR_COMMAND_WRITE).unwrap();
+    }
+
+    fn unknown_qcy_fixture() -> Vec<BlueZObject> {
+        let dev = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+        let svc = format!("{dev}/service0001");
+        let char_cmd = format!("{svc}/char0001");
+        let char_batt = format!("{svc}/char0002");
+        vec![
+            obj(
+                dev,
+                DEVICE_IFACE,
+                vec![
+                    ("Address", PropValue::Str("AA:BB:CC:DD:EE:FF".into())),
+                    ("Alias", PropValue::Str("QCY T20".into())),
+                ],
+            ),
+            obj(
+                &svc,
+                SERVICE_IFACE,
+                vec![("UUID", PropValue::Str(SERVICE_MAIN.into()))],
+            ),
+            obj(
+                &char_cmd,
+                CHAR_IFACE,
+                vec![(
+                    "UUID",
+                    PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+                )],
+            ),
+            obj(
+                &char_batt,
+                CHAR_IFACE,
+                vec![(
+                    "UUID",
+                    PropValue::Str("00000008-0000-1000-8000-00805f9b34fb".into()),
+                )],
+            ),
+        ]
+    }
+
+    #[test]
+    fn unknown_model_device_is_read_only_after_connect() {
+        let (mut t, writes) = transport(unknown_qcy_fixture());
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        match t.write(&frame) {
+            Err(TransportError::Denied(crate::policy::Denial::ReadOnlyDevice)) => {}
+            other => panic!("expected ReadOnlyDevice denial, got {other:?}"),
+        }
+        assert!(writes.lock().expect("writes mutex").is_empty());
+        // Read-only still permits characteristic reads.
+        assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn disconnect_clears_model_evidence() {
+        let (mut t, writes) = transport(ht08_fixture());
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        t.disconnect().unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        // After disconnect the device is both gone and no longer proven: nothing
+        // may reach the bus either way.
+        assert!(matches!(
+            t.write(&frame),
+            Err(TransportError::Denied(_)) | Err(TransportError::Disconnected)
+        ));
+        assert!(writes.lock().expect("writes mutex").is_empty());
     }
 
     #[test]

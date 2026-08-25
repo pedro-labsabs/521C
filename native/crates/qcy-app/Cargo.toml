@@ -1,0 +1,20 @@
+[package]
+name = "qcy-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "521C application core: typed state/actions over transport + host services, XDG persistence"
+publish = false
+
+[dependencies]
+qcy-protocol = { path = "../qcy-protocol" }
+qcy-transport = { path = "../qcy-transport", default-features = false }
+qcy-host = { path = "../qcy-host", default-features = false }
+qcy-device = { path = "../qcy-device" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["bluez", "host"]
+bluez = ["qcy-transport/bluez"]
+host = ["qcy-host/dbus"]

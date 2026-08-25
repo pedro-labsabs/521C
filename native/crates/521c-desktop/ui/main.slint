@@ -1,0 +1,393 @@
+// 521C desktop UI (issue #8).
+//
+// Boundary rule: this file only sees typed state and capability metadata from the
+// qcy-app core. Raw GATT bytes, opcodes and policy decisions never reach this layer;
+// denials arrive as user-readable strings.
+
+import {
+    Button,
+    CheckBox,
+    ComboBox,
+    GroupBox,
+    HorizontalBox,
+    ProgressIndicator,
+    Switch,
+    TabWidget,
+    VerticalBox,
+} from "std-widgets.slint";
+
+export global AppState {
+    // Transport / session
+    in-out property <string> transport-badge: "mock";
+    in-out property <bool> mock-mode: true;
+    in-out property <string> status-line: "Not connected.";
+
+    // Device
+    in-out property <bool> connected: false;
+    in-out property <string> device-name: "—";
+    in-out property <string> device-address: "—";
+    in-out property <string> firmware: "—";
+    in-out property <string> rssi: "—";
+    in-out property <bool> model-known: false;
+    in-out property <int> battery-left: 0;
+    in-out property <int> battery-right: 0;
+    in-out property <int> battery-case: 0;
+    in-out property <bool> charging-left: false;
+    in-out property <bool> charging-right: false;
+    in-out property <bool> charging-case: false;
+    in-out property <bool> has-battery: false;
+
+    // Controls
+    in-out property <int> noise-mode: 0; // 0 off, 1 anc, 2 outdoor, 3 transparency
+    in-out property <bool> game-mode: false;
+    in-out property <bool> sleep-mode: false;
+    in-out property <bool> in-ear-detection: true;
+
+    // Host services
+    in-out property <string> media-title: "—";
+    in-out property <string> media-artist: "—";
+    in-out property <string> media-player: "—";
+    in-out property <bool> media-playing: false;
+    in-out property <string> codec-text: "—";
+    in-out property <bool> system-eq-on: false;
+    in-out property <string> system-eq-text: "off";
+
+    // Event log (bounded, newest last)
+    in-out property <string> event-log: "";
+}
+
+export component MainWindow inherits Window {
+    title: "521C — QCY control surface";
+    preferred-width: 760px;
+    preferred-height: 640px;
+
+    callback scan-clicked();
+    callback connect-clicked(int);
+    callback disconnect-clicked();
+    callback refresh-clicked();
+    callback noise-changed(int);
+    callback game-mode-changed(bool);
+    callback sleep-mode-changed(bool);
+    callback in-ear-changed(bool);
+    callback find-clicked();
+    callback find-confirmed(bool);
+    callback media-play();
+    callback media-pause();
+    callback media-next();
+    callback media-previous();
+    callback media-refresh();
+    callback codec-refresh();
+    callback system-eq-toggled(bool);
+
+    in-out property <[string]> devices: [];
+    in-out property <int> selected-device: 0;
+    in-out property <bool> find-dialog-open: false;
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "521C";
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: badge.preferred-width + 16px;
+                height: badge.preferred-height + 8px;
+                border-radius: 4px;
+                background: AppState.mock-mode ? #7a5c00 : #1d4ed8;
+                badge := Text {
+                    text: AppState.mock-mode ? "MOCK transport (development)" : "BlueZ transport";
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {}
+            Text {
+                text: AppState.connected ? "Connected" : "Not connected";
+                color: AppState.connected ? #16a34a : #6b7280;
+                vertical-alignment: center;
+            }
+        }
+
+        TabWidget {
+            Tab {
+                title: "Device";
+                VerticalBox {
+                    padding: 6px;
+                    spacing: 6px;
+
+                    GroupBox {
+                        title: "Connection";
+                        HorizontalBox {
+                            spacing: 6px;
+                            Button {
+                                text: "Scan";
+                                clicked => { root.scan-clicked(); }
+                            }
+                            ComboBox {
+                                model: root.devices;
+                                current-index <=> root.selected-device;
+                                enabled: root.devices.length > 0;
+                            }
+                            Button {
+                                text: "Connect";
+                                enabled: root.devices.length > 0 && !AppState.connected;
+                                clicked => { root.connect-clicked(root.selected-device); }
+                            }
+                            Button {
+                                text: "Disconnect";
+                                enabled: AppState.connected;
+                                clicked => { root.disconnect-clicked(); }
+                            }
+                            Button {
+                                text: "Refresh";
+                                enabled: AppState.connected;
+                                clicked => { root.refresh-clicked(); }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Status";
+                        HorizontalBox {
+                            spacing: 16px;
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "Device: " + AppState.device-name; }
+                                Text { text: "Address: " + AppState.device-address; }
+                                Text { text: "Firmware: " + AppState.firmware; }
+                                Text { text: "RSSI: " + AppState.rssi; }
+                                Text {
+                                    text: AppState.model-known
+                                        ? "Model: QCY MeloBuds Pro (HT08) — proven"
+                                        : "Model: unknown — read-only";
+                                    color: AppState.model-known ? #16a34a : #b45309;
+                                }
+                            }
+                            VerticalBox {
+                                spacing: 2px;
+                                visible: AppState.has-battery;
+                                HorizontalBox {
+                                    Text { text: "Left"; width: 40px; }
+                                    ProgressIndicator { progress: AppState.battery-left / 100.0; }
+                                    Text {
+                                        width: 60px;
+                                        text: AppState.battery-left + "%" + (AppState.charging-left ? " ⚡" : "");
+                                    }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Right"; width: 40px; }
+                                    ProgressIndicator { progress: AppState.battery-right / 100.0; }
+                                    Text {
+                                        width: 60px;
+                                        text: AppState.battery-right + "%" + (AppState.charging-right ? " ⚡" : "");
+                                    }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Case"; width: 40px; }
+                                    ProgressIndicator { progress: AppState.battery-case / 100.0; }
+                                    Text {
+                                        width: 60px;
+                                        text: AppState.battery-case + "%" + (AppState.charging-case ? " ⚡" : "");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Noise control";
+                        enabled: AppState.connected && AppState.model-known;
+                        HorizontalBox {
+                            spacing: 6px;
+                            Button {
+                                text: "Off";
+                                enabled: AppState.noise-mode != 0;
+                                clicked => { root.noise-changed(0); }
+                            }
+                            Button {
+                                text: "ANC";
+                                enabled: AppState.noise-mode != 1;
+                                clicked => { root.noise-changed(1); }
+                            }
+                            Button {
+                                text: "Outdoor";
+                                enabled: AppState.noise-mode != 2;
+                                clicked => { root.noise-changed(2); }
+                            }
+                            Button {
+                                text: "Transparency";
+                                enabled: AppState.noise-mode != 3;
+                                clicked => { root.noise-changed(3); }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Modes";
+                        enabled: AppState.connected && AppState.model-known;
+                        VerticalBox {
+                            spacing: 4px;
+                            Switch {
+                                text: "Game mode (low latency)";
+                                checked <=> AppState.game-mode;
+                                toggled => { root.game-mode-changed(self.checked); }
+                            }
+                            Switch {
+                                text: "Sleep mode";
+                                checked <=> AppState.sleep-mode;
+                                toggled => { root.sleep-mode-changed(self.checked); }
+                            }
+                            Switch {
+                                text: "In-ear detection";
+                                checked <=> AppState.in-ear-detection;
+                                toggled => { root.in-ear-changed(self.checked); }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Find Earbuds";
+                        enabled: AppState.connected && AppState.model-known;
+                        HorizontalBox {
+                            spacing: 6px;
+                            Button {
+                                text: "Find Earbuds…";
+                                clicked => { root.find-dialog-open = true; }
+                            }
+                            Text {
+                                text: "Interactive only — sounds a chime; never fired automatically.";
+                                color: #6b7280;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: "Host audio";
+                VerticalBox {
+                    padding: 6px;
+                    spacing: 6px;
+
+                    GroupBox {
+                        title: "Media player (MPRIS — host service, not a device feature)";
+                        VerticalBox {
+                            spacing: 4px;
+                            Text { text: "Player: " + AppState.media-player; }
+                            Text { text: AppState.media-title; font-size: 16px; }
+                            Text { text: AppState.media-artist; color: #6b7280; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "⏮"; clicked => { root.media-previous(); } }
+                                Button {
+                                    text: AppState.media-playing ? "⏸" : "▶";
+                                    clicked => { AppState.media-playing ? root.media-pause() : root.media-play(); }
+                                }
+                                Button { text: "⏭"; clicked => { root.media-next(); } }
+                                Button { text: "Refresh"; clicked => { root.media-refresh(); } }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Bluetooth codec (BlueZ A2DP transport)";
+                        HorizontalBox {
+                            spacing: 6px;
+                            Text { text: AppState.codec-text; vertical-alignment: center; }
+                            Button { text: "Refresh"; clicked => { root.codec-refresh(); } }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "System EQ (PipeWire host filter — not a device DSP)";
+                        HorizontalBox {
+                            spacing: 6px;
+                            Switch {
+                                text: "Enable 10-band flat system EQ";
+                                checked <=> AppState.system-eq-on;
+                                toggled => { root.system-eq-toggled(self.checked); }
+                            }
+                            Text {
+                                text: AppState.system-eq-text;
+                                color: #6b7280;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: "Log";
+                VerticalBox {
+                    padding: 6px;
+                    Flickable {
+                        viewport-height: log-text.preferred-height;
+                        log-text := Text {
+                            text: AppState.event-log;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: AppState.status-line;
+            color: #374151;
+        }
+    }
+
+    PopupWindow {
+        visible: root.find-dialog-open;
+        close-policy: no-auto-close;
+        width: 420px;
+        height: 200px;
+        Rectangle {
+            background: white;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #d1d5db;
+            VerticalBox {
+                padding: 12px;
+                spacing: 8px;
+                Text {
+                    text: "Find Earbuds preflight";
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "The earbuds will play a loud chime. If they are being worn, this can be uncomfortable or harmful.";
+                    wrap: word-wrap;
+                }
+                confirm-box := CheckBox {
+                    text: "I confirm the earbuds are NOT being worn.";
+                }
+                HorizontalBox {
+                    spacing: 6px;
+                    Rectangle {}
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.find-dialog-open = false; }
+                    }
+                    Button {
+                        text: "Sound chime";
+                        enabled: confirm-box.checked;
+                        clicked => {
+                            root.find-dialog-open = false;
+                            root.find-confirmed(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
