@@ -127,6 +127,10 @@ export type HubActions = {
   setTheme: (theme: ThemeMode) => void;
   scan: () => Promise<void>;
   connect: (id: string, kind?: TransportKind) => Promise<void>;
+  /** Explicit user-gesture flow to connect a real device over Web Bluetooth (issue #2). */
+  connectWebBluetooth: () => Promise<void>;
+  /** Explicitly (re)select the mock transport. */
+  connectMock: () => Promise<void>;
   disconnect: () => Promise<void>;
   setNoise: (mode: NoiseUiMode, level?: number) => Promise<boolean>;
   setGameMode: (on: boolean) => Promise<boolean>;
@@ -381,15 +385,19 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
         const prev = get().device;
         setState({ device });
         const n = get().notify;
-        if (n.batteryCritical && device.battery.left.level <= 8 && prev.battery.left.level > 8) {
-          setState({ toast: { id: toastSeq++, title: "Critical battery", body: "Left bud is at 8% or below." } });
-        } else if (n.batteryLow && device.battery.left.level <= 20 && prev.battery.left.level > 20) {
-          setState({ toast: { id: toastSeq++, title: "Low battery", body: "Left bud below 20%." } });
-        }
-        const uneven = Math.abs(device.battery.left.level - device.battery.right.level) >= 25;
-        const wasUneven = Math.abs(prev.battery.left.level - prev.battery.right.level) >= 25;
-        if (n.batteryUneven && uneven && !wasUneven) {
-          setState({ toast: { id: toastSeq++, title: "Uneven battery", body: "Left and right differ by 25% or more." } });
+        // Battery alerts only fire on observed telemetry, never on unknown/placeholder
+        // values from a freshly connected real device (issue #2).
+        if (device.telemetryKnown) {
+          if (n.batteryCritical && device.battery.left.level <= 8 && prev.battery.left.level > 8) {
+            setState({ toast: { id: toastSeq++, title: "Critical battery", body: "Left bud is at 8% or below." } });
+          } else if (n.batteryLow && device.battery.left.level <= 20 && prev.battery.left.level > 20) {
+            setState({ toast: { id: toastSeq++, title: "Low battery", body: "Left bud below 20%." } });
+          }
+          const uneven = Math.abs(device.battery.left.level - device.battery.right.level) >= 25;
+          const wasUneven = Math.abs(prev.battery.left.level - prev.battery.right.level) >= 25;
+          if (n.batteryUneven && uneven && !wasUneven) {
+            setState({ toast: { id: toastSeq++, title: "Uneven battery", body: "Left and right differ by 25% or more." } });
+          }
         }
       },
       onLog: (entry: PacketLogEntry) => {
@@ -408,6 +416,40 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
       setState({ toast: { id: toastSeq++, title: "Connected", body: get().device.name } });
     }
     persistFrom(get);
+  },
+
+  connectWebBluetooth: async () => {
+    if (!webBluetoothAvailable()) {
+      setState({
+        toast: {
+          id: toastSeq++,
+          title: "Web Bluetooth unavailable",
+          body: "Requires a Chromium browser and a secure context (HTTPS or localhost).",
+        },
+      });
+      return;
+    }
+    // A real session starts fresh: new transport with unknown telemetry. scan() must run
+    // on the Web Bluetooth transport so requestDevice happens inside this user gesture.
+    transport = new WebBluetoothTransport();
+    setState({ transportKind: "web-bluetooth", experimentalOptIn: false });
+    await get().scan();
+    const d = get().discovered[0];
+    if (!d) {
+      setState({
+        toast: { id: toastSeq++, title: "No device selected", body: "Choose a QCY device to connect." },
+      });
+      return;
+    }
+    await get().connect(d.id, "web-bluetooth");
+  },
+
+  connectMock: async () => {
+    transport = new MockTransport();
+    setState({ transportKind: "mock", experimentalOptIn: false });
+    await get().scan();
+    const d = get().discovered[0];
+    if (d) await get().connect(d.id, "mock");
   },
 
   disconnect: async () => {

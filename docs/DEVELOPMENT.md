@@ -31,6 +31,22 @@ cargo test --workspace
 The CLI crate is named `five21cctl` because Cargo package names cannot start
 with a digit; the built binary keeps the contracted name `521cctl`.
 
+## Web Bluetooth (development transport)
+
+The web app defaults to the mock transport, which is visibly labelled
+"Mock preview" in the header. To exercise a real device during development:
+
+1. Use a Chromium browser over a secure context (HTTPS or `localhost`).
+2. Click **Connect real device** — this is an explicit user gesture, which Web
+   Bluetooth requires for `requestDevice`.
+3. Choose the QCY device in the browser picker.
+
+Real sessions start with unknown telemetry (`--` battery, blank firmware) and
+populate proven fields from the initial state sync and notifications; they never
+borrow mock battery/firmware values. Real-device writes still pass through the
+central write-authorization policy. Web Bluetooth is a development path only —
+the primary Linux transport is native BlueZ (issue #7).
+
 ## Validation ladder
 
 Run the narrowest relevant test while iterating, then run the full gate before a pull request is considered ready. From a clean checkout, install with `npm ci` first so the locked dependency graph is used:

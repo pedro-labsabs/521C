@@ -5,15 +5,23 @@ function Ring({
   value,
   charging,
   label,
+  known,
 }: {
   value: number;
   charging: boolean;
   label: string;
+  known: boolean;
 }) {
   const r = 28;
   const c = 2 * Math.PI * r;
-  const offset = c - (Math.max(0, Math.min(100, value)) / 100) * c;
-  const tone = value <= 15 ? "stroke-danger" : value <= 30 ? "stroke-warn" : "stroke-accent";
+  const offset = known ? c - (Math.max(0, Math.min(100, value)) / 100) * c : c;
+  const tone = !known
+    ? "stroke-border"
+    : value <= 15
+      ? "stroke-danger"
+      : value <= 30
+        ? "stroke-warn"
+        : "stroke-accent";
   return (
     <div className="flex flex-col items-center gap-2">
       <div className="relative size-20">
@@ -31,13 +39,15 @@ function Ring({
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="tabular text-sm font-semibold leading-none">{value}</span>
+          <span className="tabular text-sm font-semibold leading-none">{known ? value : "--"}</span>
           <span className="text-[10px] uppercase tracking-wide text-fg-subtle">%</span>
         </div>
       </div>
       <div className="text-center">
         <div className="text-xs font-medium text-fg">{label}</div>
-        <div className="text-[11px] text-fg-subtle">{charging ? "Charging" : "Discharging"}</div>
+        <div className="text-[11px] text-fg-subtle">
+          {!known ? "Unknown" : charging ? "Charging" : "Discharging"}
+        </div>
       </div>
     </div>
   );
@@ -50,6 +60,7 @@ export function EarbudsStage({
   wornLeft,
   wornRight,
   connected,
+  known = true,
 }: {
   left: BatteryCell;
   right: BatteryCell;
@@ -57,6 +68,7 @@ export function EarbudsStage({
   wornLeft: boolean;
   wornRight: boolean;
   connected: boolean;
+  known?: boolean;
 }) {
   return (
     <div className="relative overflow-hidden rounded-xl border border-border bg-bg-subtle px-4 py-6 shadow-[var(--shadow-panel)]">
@@ -66,9 +78,9 @@ export function EarbudsStage({
         <Bud side="R" worn={wornRight} connected={connected} />
       </div>
       <div className="mt-6 flex justify-center gap-8">
-        <Ring value={left.level} charging={left.charging} label="Left" />
-        <Ring value={right.level} charging={right.charging} label="Right" />
-        <Ring value={caseCell.level} charging={caseCell.charging} label="Case" />
+        <Ring value={left.level} charging={left.charging} label="Left" known={known} />
+        <Ring value={right.level} charging={right.charging} label="Right" known={known} />
+        <Ring value={caseCell.level} charging={caseCell.charging} label="Case" known={known} />
       </div>
     </div>
   );
