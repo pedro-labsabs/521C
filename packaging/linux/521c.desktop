@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=521C
+GenericName=QCY earbuds control surface
+Comment=Independent, unofficial Linux control surface for QCY earbuds (first profile: MeloBuds Pro / HT08)
+Exec=521c
+Icon=521c
+Terminal=false
+Categories=AudioVideo;Audio;Utility;HardwareSettings;
+Keywords=qcy;bluetooth;earbuds;anc;ht08;melobuds;
+StartupNotify=true

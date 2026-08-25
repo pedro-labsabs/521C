@@ -60,6 +60,65 @@ proven from its name is reported and treated as read-only. The live D-Bus bounda
 is compiled behind the `bluez` Cargo feature (default on); the transport trait,
 object mapping, policy and mock always build and are unit-tested without hardware.
 
+## Desktop app (issue #8)
+
+The native desktop application is `native/crates/521c-desktop` (crate
+`five21c-desktop`, installed binary `521c`): a Slint GUI over the `qcy-app`
+core. Architecture decision and boundary rules: `docs/DESKTOP_ARCHITECTURE.md`.
+
+```bash
+cd native
+cargo run -p five21c-desktop --bin 521c             # BlueZ transport (default)
+cargo run -p five21c-desktop --bin 521c -- --mock   # clearly labelled mock backend
+cargo run -p five21c-desktop --bin 521c -- --self-test   # launch check, exits 0
+```
+
+The app falls back to the mock transport (visibly) when the BlueZ system bus is
+unavailable. Configuration persists at `~/.config/521c/config.json` (XDG; the
+same validated JSON contract as the browser schema, issue #11).
+
+Runtime dependencies on Linux Mint-class systems: BlueZ + system D-Bus for real
+hardware, a D-Bus session bus for MPRIS, PipeWire user config for system EQ, and
+fontconfig/libxkbcommon plus an X11/Wayland session for the window. Normal use
+never requires root.
+
+### AppImage
+
+Build the self-contained artifact (release build + AppDir + appimagetool):
+
+```bash
+scripts/package-appimage.sh        # needs appimagetool; see below
+ls native/dist/521C-*.AppImage
+```
+
+`appimagetool` is official AppImage project release tooling and is not vendored
+in the repository. Get it from <https://github.com/AppImage/appimagetool/releases>
+and either put it on `PATH` or point `$APPIMAGETOOL` at it. CI builds the same
+artifact on every push (job `desktop-package`).
+
+Install/uninstall (user-local, no root):
+
+```bash
+# install: keep the AppImage and register a menu entry
+mkdir -p ~/Applications ~/.local/share/applications
+cp native/dist/521C-0.1.0-x86_64.AppImage ~/Applications/
+cp packaging/linux/521c.desktop ~/.local/share/applications/
+mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+cp native/crates/521c-desktop/assets/icons/521c_256.png \
+   ~/.local/share/icons/hicolor/256x256/apps/521c.png
+update-desktop-database ~/.local/share/applications || true
+
+# uninstall
+rm -f ~/Applications/521C-*.AppImage \
+      ~/.local/share/applications/521c.desktop \
+      ~/.local/share/icons/hicolor/*/apps/521c.png
+update-desktop-database ~/.local/share/applications || true
+# user config (optional): rm -rf ~/.config/521c
+```
+
+Alternatively, run the AppImage directly without installing:
+`./521C-0.1.0-x86_64.AppImage`.
+
 ## Web Bluetooth (development transport)
 
 The web app defaults to the mock transport, which is visibly labelled

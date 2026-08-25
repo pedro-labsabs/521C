@@ -1,0 +1,27 @@
+[package]
+# Cargo package names cannot start with a digit, so the crate is `five21c-desktop`
+# while the installed desktop binary keeps the contracted brand name `521c`.
+name = "five21c-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "521C native Linux desktop application (Slint GUI over the qcy-app core)"
+license = "MIT"
+
+[[bin]]
+name = "521c"
+path = "src/main.rs"
+
+[dependencies]
+slint = "1"
+qcy-protocol = { path = "../qcy-protocol" }
+qcy-transport = { path = "../qcy-transport" }
+qcy-host = { path = "../qcy-host" }
+qcy-device = { path = "../qcy-device" }
+qcy-app = { path = "../qcy-app" }
+
+[build-dependencies]
+slint-build = "1"
+
+[features]
+default = ["bluez"]
+bluez = ["qcy-transport/bluez", "qcy-host/dbus"]

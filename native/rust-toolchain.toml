@@ -1,0 +1,5 @@
+# 521C native workspace requires current stable (Slint's dependency graph
+# moves faster than pinned older toolchains). CI uses stable as well.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

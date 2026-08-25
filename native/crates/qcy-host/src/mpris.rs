@@ -41,7 +41,7 @@ pub struct MediaStatus {
 
 /// Minimal MPRIS D-Bus surface. Implemented for real by [`ZbusMprisBus`] and faked in
 /// unit tests.
-pub trait MprisBus {
+pub trait MprisBus: Send {
     /// Bus names of currently present MPRIS players (`org.mpris.MediaPlayer2.*`).
     fn list_players(&self) -> Result<Vec<String>, HostError>;
     /// The `Identity` property (human-friendly player name).
@@ -287,11 +287,10 @@ impl MprisBus for ZbusMprisBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    type ControlLog = Rc<RefCell<Vec<(String, MediaAction)>>>;
+    type ControlLog = Arc<Mutex<Vec<(String, MediaAction)>>>;
 
     #[derive(Default)]
     struct FakePlayer {
@@ -347,14 +346,15 @@ mod tests {
                 return Err(HostError::NotFound(bus_name.into()));
             }
             self.controls
-                .borrow_mut()
+                .lock()
+                .expect("controls mutex")
                 .push((bus_name.to_string(), action));
             Ok(())
         }
     }
 
     fn host_with_player() -> (MprisHost, ControlLog) {
-        let controls = Rc::new(RefCell::new(Vec::new()));
+        let controls = Arc::new(Mutex::new(Vec::new()));
         let mut players = HashMap::new();
         players.insert(
             "org.mpris.MediaPlayer2.mpv".to_string(),
@@ -405,7 +405,7 @@ mod tests {
     fn control_targets_first_player() {
         let (host, controls) = host_with_player();
         host.control(None, MediaAction::Pause).unwrap();
-        let c = controls.borrow();
+        let c = controls.lock().expect("controls mutex");
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].1, MediaAction::Pause);
     }

@@ -111,7 +111,7 @@ pub struct A2dpTransport {
 
 /// A source of A2DP transport facts. Implemented against the live system bus by
 /// [`ZbusCodecBus`] (feature `dbus`) and by fakes in unit tests.
-pub trait CodecBus {
+pub trait CodecBus: Send {
     fn a2dp_transports(&self) -> Result<Vec<A2dpTransport>, HostError>;
 }
 
@@ -505,7 +505,7 @@ mod tests {
             select_transport(&[idle.clone(), pending.clone()]),
             Some(&pending)
         );
-        assert_eq!(select_transport(&[idle.clone()]), Some(&idle));
+        assert_eq!(select_transport(std::slice::from_ref(&idle)), Some(&idle));
         assert_eq!(select_transport(&[]), None);
     }
 

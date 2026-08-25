@@ -181,7 +181,7 @@ pub enum SystemEqCommand {
 /// Handle returned by [`AppCore::start`]: send commands, receive events, join on drop.
 pub struct AppHandle {
     pub commands: Sender<AppCommand>,
-    pub events: Receiver<AppEvent>,
+    events: Option<Receiver<AppEvent>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -191,9 +191,18 @@ impl AppHandle {
             .send(cmd)
             .map_err(|_| "application core stopped".to_string())
     }
-    /// Wait for the next event with a timeout (UI pumps this from its event loop).
+    /// Take ownership of the event receiver (e.g. to move it into a UI pump
+    /// thread). `Receiver` is not `Clone`, so this can only be done once.
+    pub fn take_events(&mut self) -> Option<Receiver<AppEvent>> {
+        self.events.take()
+    }
+
+    /// Wait for the next event with a timeout (when the receiver was not taken).
     pub fn try_recv_event(&self, timeout: std::time::Duration) -> Option<AppEvent> {
-        match self.events.recv_timeout(timeout) {
+        let Some(events) = &self.events else {
+            return None;
+        };
+        match events.recv_timeout(timeout) {
             Ok(event) => Some(event),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => None,
@@ -231,6 +240,7 @@ impl AppCore {
             .spawn(move || {
                 let mut transport = transport;
                 let mut snapshot = DeviceSnapshot::default();
+                let mut last_discovered: Vec<DiscoveredDevice> = Vec::new();
                 let mut experimental_opt_in = false;
 
                 let emit = |event: AppEvent| {
@@ -281,14 +291,24 @@ impl AppCore {
                     match cmd {
                         AppCommand::Shutdown => break,
                         AppCommand::Scan => match transport.scan() {
-                            Ok(list) => emit(AppEvent::Discovered(list)),
+                            Ok(list) => {
+                                last_discovered = list.clone();
+                                emit(AppEvent::Discovered(list));
+                            }
                             Err(e) => emit(AppEvent::Error(format!("scan failed: {e}"))),
                         },
                         AppCommand::Connect(address) => {
                             match transport.connect(&address) {
                                 Ok(()) => {
                                     snapshot.connected = true;
-                                    snapshot.address = address;
+                                    snapshot.address = address.clone();
+                                    if let Some(dev) =
+                                        last_discovered.iter().find(|d| d.address == address)
+                                    {
+                                        snapshot.name = dev.name.clone();
+                                        snapshot.rssi = dev.rssi;
+                                        snapshot.model_known = dev.model_known;
+                                    }
                                     refresh_status(&mut transport, &mut snapshot);
                                     emit(AppEvent::StateChanged(snapshot.clone()));
                                 }
@@ -460,7 +480,7 @@ impl AppCore {
 
         AppHandle {
             commands: cmd_tx,
-            events: event_rx,
+            events: Some(event_rx),
             worker: Some(worker),
         }
     }

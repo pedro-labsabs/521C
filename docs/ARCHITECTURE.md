@@ -40,6 +40,18 @@ destructive opcodes (`0x01`/`0x02`/`0x03`) are never sent, unknown models stay r
 and experimental opcodes need a session opt-in. The live D-Bus boundary is compiled behind
 the `bluez` Cargo feature (default on); the trait, mapping, policy and mock always build.
 
+## Desktop application (`native/crates/521c-desktop`)
+
+The release UI is a single native process: a Slint UI thread over the `qcy-app`
+core worker (typed `AppCommand`/`AppEvent` channels). No IPC in v1, no embedded
+browser; the typed API is shaped so an IPC boundary can be added later without
+changing the UI contract. The UI only sees typed state and user-readable denial
+messages — raw GATT bytes stay below this boundary, and write authorization is
+never reimplemented here (every write converges on the transport's central
+`WritePolicy`). Mock mode (`--mock`) is clearly labelled in the UI; the packaged
+app uses native BlueZ and does not require Web Bluetooth. Full decision record,
+lifecycle/tray alternative, XDG persistence and packaging: `docs/DESKTOP_ARCHITECTURE.md`.
+
 ## Host services (`native/crates/qcy-host`)
 
 The host-services layer is the host-side counterpart to the transport. It owns

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pedro-labsabs.521c</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>521C</name>
+  <summary>Independent Linux control surface for QCY earbuds</summary>
+  <description>
+    <p>
+      521C is an independent, unofficial, local-first desktop application for
+      QCY earbuds on Linux. The first device profile is the QCY MeloBuds Pro
+      (HT08): battery and firmware status, ANC/transparency scenes, game mode,
+      wear detection, sleep mode and a preflight-gated find-earbuds chime,
+      plus host integrations (MPRIS media control, codec status, system EQ).
+    </p>
+    <p>
+      Bluetooth access uses the system BlueZ stack over D-Bus; no root, no
+      daemon replacement, no telemetry, no account. Unknown QCY devices stay
+      read-only, and destructive commands are unreachable from the app.
+    </p>
+  </description>
+  <launchable type="desktop-id">521c.desktop</launchable>
+  <provides>
+    <binary>521c</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-08-25"/>
+  </releases>
+  <content_rating id="oars-1.1"/>
+  <url type="homepage">https://github.com/pedro-labsabs/521C</url>
+  <url type="bugtracker">https://github.com/pedro-labsabs/521C/issues</url>
+</component>
