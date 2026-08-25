@@ -24,6 +24,13 @@ import {
 import { DEVICE_EQ_PRESETS } from "./eq-presets";
 import { HT08_PROFILE, identifyProfile, type QcyDeviceProfile } from "./device/catalog";
 import { FunId, KeyId } from "./protocol/types";
+import {
+  authorizeDirectWrite,
+  authorizeFrameWrite,
+  DEFAULT_OPT_IN,
+  WriteDeniedError,
+  type SessionOptIn,
+} from "./policy";
 
 export type TransportKind = "mock" | "web-bluetooth";
 
@@ -176,9 +183,22 @@ export interface QcyTransport {
   scan(): Promise<DiscoveredDevice[]>;
   connect(id: string, events: TransportEvents): Promise<void>;
   disconnect(): Promise<void>;
+  /**
+   * Framed write to the command characteristic. Must pass the central
+   * write-authorization policy; denied writes reject with WriteDeniedError.
+   */
   write(bytes: Uint8Array): Promise<void>;
+  /**
+   * Unframed write to a specific allowlisted characteristic. Must pass the
+   * central write-authorization policy; denied writes reject with WriteDeniedError.
+   */
   writeDirect(charUuid: string, bytes: Uint8Array): Promise<void>;
   read(charUuid: string): Promise<Uint8Array>;
+  /**
+   * Session-scoped opt-in for experimental writes. Not persisted across
+   * sessions; transports reset it to the default on construction.
+   */
+  setExperimentalOptIn(on: boolean): void;
 }
 
 function respond(cmd: number, params: ArrayLike<number>): Uint8Array {
@@ -217,6 +237,11 @@ export class MockTransport implements QcyTransport {
   private events: TransportEvents | null = null;
   private rssiTimer: ReturnType<typeof setInterval> | null = null;
   private smoothRssi = -48;
+  private optIn: SessionOptIn = { ...DEFAULT_OPT_IN };
+
+  setExperimentalOptIn(on: boolean): void {
+    this.optIn = { ...this.optIn, experimental: on };
+  }
 
   private advBytes(): Uint8Array {
     return encodeManufacturerData({
@@ -273,6 +298,8 @@ export class MockTransport implements QcyTransport {
   }
 
   async write(bytes: Uint8Array): Promise<void> {
+    const auth = authorizeFrameWrite(this.state.profile, this.optIn, bytes);
+    if (!auth.ok) throw new WriteDeniedError(auth.denial);
     const decoded = decodePacket(bytes);
     const summary = decoded.ok
       ? decoded.packet.blocks.map((b) => cmdName(b.cmd)).join(",")
@@ -285,6 +312,8 @@ export class MockTransport implements QcyTransport {
   }
 
   async writeDirect(charUuid: string, bytes: Uint8Array): Promise<void> {
+    const auth = authorizeDirectWrite(this.state.profile, this.optIn, charUuid, bytes);
+    if (!auth.ok) throw new WriteDeniedError(auth.denial);
     this.emitLog("tx", bytes, `direct ${charUuid.slice(4, 8)}`, 0);
     if (charUuid.toLowerCase() === CHAR.keyFunctionV2) {
       this.state = { ...this.state, bindings: parseKeyFunctionBytes(bytes) };
@@ -570,6 +599,11 @@ export class WebBluetoothTransport implements QcyTransport {
   private device: BluetoothDevice | null = null;
   private writeChar: BluetoothRemoteGATTCharacteristic | null = null;
   private events: TransportEvents | null = null;
+  private optIn: SessionOptIn = { ...DEFAULT_OPT_IN };
+
+  setExperimentalOptIn(on: boolean): void {
+    this.optIn = { ...this.optIn, experimental: on };
+  }
   private state = createInitialState({ connected: false, audio: {
     codec: "unknown",
     sampleRate: null,
@@ -649,6 +683,8 @@ export class WebBluetoothTransport implements QcyTransport {
   }
 
   async write(bytes: Uint8Array): Promise<void> {
+    const auth = authorizeFrameWrite(this.state.profile, this.optIn, bytes);
+    if (!auth.ok) throw new WriteDeniedError(auth.denial);
     if (!this.writeChar) throw new Error("Not connected");
     this.events?.onLog({
       id: logSeq++,
@@ -662,8 +698,21 @@ export class WebBluetoothTransport implements QcyTransport {
     await this.writeChar.writeValue(copy);
   }
 
-  async writeDirect(_charUuid: string, bytes: Uint8Array): Promise<void> {
-    await this.write(bytes);
+  async writeDirect(charUuid: string, bytes: Uint8Array): Promise<void> {
+    const auth = authorizeDirectWrite(this.state.profile, this.optIn, charUuid, bytes);
+    if (!auth.ok) throw new WriteDeniedError(auth.denial);
+    if (!this.writeChar) throw new Error("Not connected");
+    // TODO(#2): resolve and write the specific allowlisted characteristic rather
+    // than falling back to the command characteristic.
+    this.events?.onLog({
+      id: logSeq++,
+      at: Date.now(),
+      dir: "tx",
+      hex: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(" "),
+      summary: `direct ${charUuid.slice(4, 8)}`,
+      cmd: 0,
+    });
+    await this.writeChar.writeValue(new Uint8Array(bytes));
   }
 
   async read(_charUuid: string): Promise<Uint8Array> {
