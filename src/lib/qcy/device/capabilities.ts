@@ -223,9 +223,9 @@ export const HT08_CAPABILITIES: DeviceCapabilities = {
   autoGameMode: {
     hardware: "unknown",
     protocol: "unknown",
-    implementation: "not-implemented",
+    implementation: "implemented",
     write: "read-only",
-    note: "Host-side automation; no process/player observer yet (pending #13). No BLE traffic while idle.",
+    note: "Host automation (qcy-host): MPRIS player-presence signal (session-bus NameOwnerChanged) + debounce + keyword allowlist, no busy polling. Device writes happen only through the central policy once the desktop app (#8) wires the controller; inactive by default, so no BLE traffic while idle. Never written to the buds by the host layer.",
   },
   deviceEq: {
     hardware: "supported",
@@ -238,9 +238,9 @@ export const HT08_CAPABILITIES: DeviceCapabilities = {
   systemEq: {
     hardware: "unknown",
     protocol: "unknown",
-    implementation: "not-implemented",
+    implementation: "implemented",
     write: "read-only",
-    note: "Host PipeWire-style EQ; not implemented yet (pending #13). Never written to the buds.",
+    note: "Host PipeWire EQ (qcy-host): manages one user-scoped config artifact with clear create/remove lifecycle and no system-wide changes. Applying requires a PipeWire reload. Never written to the buds.",
   },
   eqPresets: {
     hardware: "supported",
@@ -359,9 +359,9 @@ export const HT08_CAPABILITIES: DeviceCapabilities = {
   codecStatus: {
     hardware: "unknown",
     protocol: "unknown",
-    implementation: "mock-only",
+    implementation: "implemented",
     write: "read-only",
-    note: "Read from the host audio graph when available; currently mocked (pending #13).",
+    note: "Read passively from BlueZ MediaTransport1 (codec/profile/sample rate) by qcy-host when a transport is active; fields that cannot be sourced stay unknown — never invented. The web preview shows a placeholder.",
   },
   rename: {
     hardware: "supported",

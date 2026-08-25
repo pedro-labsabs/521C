@@ -591,10 +591,18 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     persistFrom(get);
   },
   media: async (action) => {
-    const map = { play: 0x01, pause: 0x02, prev: 0x03, next: 0x04 } as const;
-    // MusicControl (0x04) is not in the documented trusted write table; the
-    // policy denies it until issue #6/#13 provide an evidenced host path (MPRIS).
-    await guard(() => transport.write(set.music(map[action])));
+    // Media control is a Linux HOST feature (MPRIS), not a QCY device command
+    // (issue #13). MusicControl (0x04) has no trusted evidence and is never written
+    // to the earbuds. The native runtime exposes MPRIS via `521cctl media ...`;
+    // the browser preview cannot reach the session bus, so it explains instead of
+    // pretending to control playback.
+    setState({
+      toast: {
+        id: toastSeq++,
+        title: "Media control is a host feature",
+        body: `MPRIS media control ("${action}") runs in the native runtime — see \`521cctl media ${action}\`. The browser preview does not control playback.`,
+      },
+    });
   },
   exportConfig: () => {
     // Portable fields only (issue #11): local-only fields (hideMac, sleepTimerMin) and

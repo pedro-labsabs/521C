@@ -76,6 +76,46 @@ borrow mock battery/firmware values. Real-device writes still pass through the
 central write-authorization policy. Web Bluetooth is a development path only —
 the primary Linux transport is native BlueZ (issue #7).
 
+## Host services (issue #13)
+
+`native/crates/qcy-host` provides Linux host functionality that is separate from the
+QCY vendor protocol and never written to the earbuds. It is exposed through `521cctl`:
+
+```bash
+521cctl media status                 # MPRIS now-playing
+521cctl media play|pause|next|prev   # MPRIS control
+521cctl codec                        # host codec/sample-rate (unknown if unavailable)
+521cctl system-eq on [10 gains...]   # create the user PipeWire EQ artifact
+521cctl system-eq off                # remove it
+521cctl system-eq status
+```
+
+Linux Mint runtime dependencies for these features:
+
+- **MPRIS** — a D-Bus session bus plus at least one running MPRIS-capable player
+  (`org.mpris.MediaPlayer2.*`). With none present, commands report "no MPRIS player".
+- **Codec/sample-rate** — read passively from BlueZ `MediaTransport1` objects on the
+  system bus (codec assigned number, configuration blob and profile UUID, per BlueZ
+  `doc/org.bluez.MediaTransport.rst` and `profiles/audio/a2dp-codecs.h`). The active
+  transport is preferred; sample rate is parsed for SBC/MPEG/AAC/LDAC layouts. Fields
+  that cannot be sourced are reported as `unknown` (never invented). No transport is
+  acquired or modified.
+- **System EQ** — PipeWire with user config under `~/.config/pipewire/pipewire.conf.d/`.
+  521C creates/removes only its own `521c-system-eq.conf`; `system-eq status` reads the
+  artifact from disk, so it is correct across CLI invocations. Applying requires
+  PipeWire to reload (typically a session restart). No system-wide config is touched.
+- **Auto Game Mode** — the chosen host signal is MPRIS player presence: players
+  appearing/disappearing as `org.mpris.MediaPlayer2.*` bus names are delivered by the
+  session bus as `NameOwnerChanged` signals (a genuine subscription, no polling). The
+  candidate name matched against the keyword allowlist is the bus-name suffix (e.g.
+  `vlc`, `steam`). The controller debounces transitions; applications without an MPRIS
+  name cannot trigger game mode. Device writes happen only through the central write
+  policy once the desktop application (#8) wires the controller.
+
+Missing services are handled gracefully. The live D-Bus integration is behind the `dbus`
+Cargo feature (default on); the traits, rule engine and lifecycle logic always build and
+are unit-tested against fakes, so no live service is needed to run the tests.
+
 ## Validation ladder
 
 Run the narrowest relevant test while iterating, then run the full gate before a pull request is considered ready. From a clean checkout, install with `npm ci` first so the locked dependency graph is used:

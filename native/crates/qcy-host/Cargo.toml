@@ -1,0 +1,16 @@
+[package]
+name = "qcy-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Linux host services (MPRIS, codec state, Auto Game Mode, System EQ) — separate from the QCY vendor protocol"
+publish = false
+
+[features]
+# Live D-Bus integration (MPRIS / NameOwnerChanged signals). The traits, rule
+# engine, debouncer and lifecycle logic always build and test without it.
+default = ["dbus"]
+dbus = ["dep:zbus"]
+
+[dependencies]
+zbus = { version = "5", optional = true }
