@@ -1,5 +1,9 @@
 # QCY BLE protocol (independent notes)
 
+**Role:** normative evidence notes for the independent reverse-engineered
+protocol. Opcodes/UUIDs not recorded here (or in the evidence ledger) are not
+invented.
+
 Source: public reverse-engineering of QCY earphone GATT traffic, cross-checked against community documentation. **Not an official spec.** Opcodes that are not in this file are not invented.
 
 Byte-level framing, advertisement, battery and firmware behavior are pinned by the shared conformance corpus at `conformance/protocol_vectors.json` (consumed by both the TypeScript and Rust test suites). Add a vector there before changing a codec or enabling a write path; see `conformance/README.md`.

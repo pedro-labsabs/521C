@@ -1,5 +1,8 @@
 # Security and safety model
 
+**Authority:** normative for trust boundaries, write authorization and
+network behavior.
+
 521C talks to physical Bluetooth devices over a reverse-engineered vendor protocol. Safety therefore includes both conventional software security and protection against unsafe device commands.
 
 ## Trust boundaries

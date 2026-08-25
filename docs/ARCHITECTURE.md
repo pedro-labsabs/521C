@@ -1,5 +1,9 @@
 # Architecture
 
+**Role:** informative architecture description. Boundaries here are
+normative in spirit but the code is the source of truth; update this document
+when layers move.
+
 This document describes the intended layer boundaries for 521C.
 
 ```

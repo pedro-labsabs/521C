@@ -34,6 +34,8 @@ jobs:
         run: npm run build
       - name: Network audit (no third-party runtime requests)
         run: npm run audit:network
+      - name: Documentation structure check
+        run: npm run docs:check
 
   native:
     name: Native · Rust stable

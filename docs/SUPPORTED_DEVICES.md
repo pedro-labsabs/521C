@@ -1,5 +1,9 @@
 # Supported devices
 
+**Role:** derived status matrix. Readiness below must stay derivable from the
+capability truth in code; update it in the same PR as any capability change
+(see `docs/README.md` §4).
+
 Independent project. Not affiliated with QCY.
 
 Every capability is described by four independent truths (see

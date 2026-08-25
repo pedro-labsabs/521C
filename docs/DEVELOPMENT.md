@@ -1,5 +1,8 @@
 # Development
 
+**Role:** informative development guide (setup, commands, packaging,
+validation ladder).
+
 ## Prerequisites
 
 - Node.js 22+ and npm
@@ -186,6 +189,7 @@ npm run typecheck
 npm run lint
 npm run build
 npm run audit:network
+npm run docs:check
 cd native
 cargo test --workspace
 cargo fmt --check
@@ -195,6 +199,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 `npm run audit:network` fails if the built application or the default shell
 contains implicit third-party runtime URLs (issue #12); see
 `docs/SECURITY_MODEL.md` for the network-behavior contract.
+
+`npm run docs:check` fails when a top-level document under `docs/` is missing
+its role marker or the documentation index (`docs/README.md`) disappears
+(issue #15).
 
 GitHub Actions (`.github/workflows/ci.yml`) runs this same ladder on Node 22 and stable Rust for every push to `main` and every pull request.
 
