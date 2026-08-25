@@ -16,6 +16,7 @@ This repository is prepared for long-running autonomous coding agents, including
 - `docs/PRODUCT_SPEC.md` — finished-product intent and scope.
 - `docs/AUTONOMOUS_EXECUTION.md` — dependency-aware delivery graph, per-issue loop and final release checklist.
 - `docs/HOST_SAFETY.md` — explicit boundary protecting the developer workstation during autonomous work.
+- `docs/GOVERNANCE.md` — review/merge standards, release policy and maintainer checklist; `docs/TRIAGE.md` — labels and milestones.
 
 The autonomous plan gives the implementation agent broad authority to make ordinary engineering decisions while keeping host changes, real-device writes and protocol claims tightly bounded.
 

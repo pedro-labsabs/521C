@@ -1,0 +1,15 @@
+# 521C ownership. Single-maintainer baseline; expand per-area when maintainers join.
+# See docs/GOVERNANCE.md for review expectations.
+
+* @pedro-labsabs
+
+# Protocol truth and safety surfaces get explicit owner attention (same owner,
+# listed so future maintainers know these paths need the most careful review).
+/src/lib/qcy/protocol/ @pedro-labsabs
+/src/lib/qcy/policy.ts @pedro-labsabs
+/native/crates/qcy-protocol/ @pedro-labsabs
+/native/crates/qcy-transport/src/policy.rs @pedro-labsabs
+/conformance/ @pedro-labsabs
+/docs/PROTOCOL.md @pedro-labsabs
+/docs/HOST_SAFETY.md @pedro-labsabs
+/docs/SECURITY_MODEL.md @pedro-labsabs
