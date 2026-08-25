@@ -478,6 +478,8 @@ export function AdvancedView() {
   const setHideMac = useHub((s) => s.setHideMac);
   const exportConfig = useHub((s) => s.exportConfig);
   const importConfig = useHub((s) => s.importConfig);
+  const experimentalOptIn = useHub((s) => s.experimentalOptIn);
+  const setExperimentalOptIn = useHub((s) => s.setExperimentalOptIn);
   const caps = HT08_CAPABILITIES;
 
   return (
@@ -532,6 +534,16 @@ export function AdvancedView() {
             </span>
           </label>
         </div>
+      </Panel>
+      <Panel title="Experimental features">
+        <Row label="Allow experimental device writes this session">
+          <Toggle checked={experimentalOptIn} onChange={setExperimentalOptIn} />
+        </Row>
+        <p className="mt-2 text-xs text-fg-muted">
+          Adaptive ANC, spatial audio and LDAC are marked experimental for HT08. Enabling
+          them requires this explicit opt-in. It applies to the current session only — it is
+          never saved and resets on restart or when the transport changes.
+        </p>
       </Panel>
       <Panel title="HT08 capability matrix">
         <div className="grid gap-2">

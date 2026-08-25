@@ -92,7 +92,7 @@ UI -> application/state/orchestration -> device profile + protocol codec -> auth
 - UI receives typed state and capability metadata.
 - Protocol modules own byte-level encoding/decoding.
 - Device profiles own model-specific capability/evidence decisions.
-- Write authorization is a shared lower-level policy and cannot be bypassed by UI, CLI, profiles, raw frames or future IPC.
+- Write authorization is a shared lower-level policy (`src/lib/qcy/policy.ts`) enforced inside every transport `write`/`writeDirect`; it cannot be bypassed by UI, CLI, profiles, raw frames or future IPC. See `docs/SECURITY_MODEL.md`.
 - Transport implementations own I/O and connection lifecycle.
 - Host-only features must not be presented as device DSP/protocol capabilities.
 - The final native UI is Slint; Bluetooth stays in Rust/BlueZ rather than a browser-only path.

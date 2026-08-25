@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { CHAR, DESTRUCTIVE_CMDS, encodeKeyFunctionDirect, set } from "./protocol";
+import { WriteDeniedError } from "./policy";
 import type { AncScene, KeyBinding } from "./protocol/types";
 import { DEVICE_EQ_PRESETS, type NamedEq, presetFromGains } from "./eq-presets";
 import { BUILTIN_PROFILES, type NoiseUiMode, type SmartProfile } from "./smart-profiles";
@@ -94,6 +95,8 @@ export type HubState = {
   systemEqGains: number[];
   cliHistory: string[];
   minimized: boolean;
+  /** Session-scoped opt-in for experimental device writes. Never persisted. */
+  experimentalOptIn: boolean;
 };
 
 export type HubActions = {
@@ -130,6 +133,7 @@ export type HubActions = {
   setWorn: (left: boolean, right: boolean) => void;
   clearLog: () => void;
   dismissToast: () => void;
+  setExperimentalOptIn: (on: boolean) => void;
 };
 
 let transport: QcyTransport = new MockTransport();
@@ -188,7 +192,25 @@ function maskMac(mac: string, hide: boolean): string {
   return `${parts[0]}:${parts[1]}:••:••:••:${parts[parts.length - 1]}`;
 }
 
-export const useHub = create<HubState & HubActions>((setState, get) => ({
+export const useHub = create<HubState & HubActions>((setState, get) => {
+  // Route a device write and surface policy denials as a toast instead of an
+  // unhandled rejection. Returns true when the write was authorized and sent.
+  const guard = async (write: () => Promise<void>): Promise<boolean> => {
+    try {
+      await write();
+      return true;
+    } catch (err) {
+      if (err instanceof WriteDeniedError) {
+        setState({
+          toast: { id: toastSeq++, title: "Write blocked", body: err.denial.message },
+        });
+        return false;
+      }
+      throw err;
+    }
+  };
+
+  return {
   view: "overview",
   theme: persisted.theme ?? "dark",
   transportKind: "mock",
@@ -217,6 +239,7 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
   systemEqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   cliHistory: ["521C CLI — type help"],
   minimized: false,
+  experimentalOptIn: false,
 
   setView: (view) => setState({ view }),
   setTheme: (theme) => {
@@ -260,6 +283,12 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
   },
   clearLog: () => setState({ log: [] }),
   dismissToast: () => setState({ toast: null }),
+  setExperimentalOptIn: (on) => {
+    // Session-scoped only: never persisted, and reset whenever a transport is
+    // (re)created. Propagated to the transport so the write policy sees it.
+    transport.setExperimentalOptIn(on);
+    setState({ experimentalOptIn: on });
+  },
 
   scan: async () => {
     setState({ scanning: true });
@@ -281,7 +310,8 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
   connect: async (id, kind) => {
     if (kind && kind !== get().transportKind) {
       transport = kind === "web-bluetooth" ? new WebBluetoothTransport() : new MockTransport();
-      setState({ transportKind: kind });
+      // A fresh transport starts a fresh session: experimental opt-in resets.
+      setState({ transportKind: kind, experimentalOptIn: false });
     }
     const events = {
       onState: (device: DeviceLiveState) => {
@@ -323,53 +353,58 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
   setNoise: async (mode, level) => {
     const lv = level ?? (mode === "transparency" ? get().device.ancScene.subScene : get().device.ancScene.subScene);
     const mapped = noiseToScene(mode, lv);
-    if (mapped.adaptive) {
-      await transport.write(set.envAdaptation("on"));
-      await transport.write(set.noiseMode(0x01));
-    } else {
-      await transport.write(set.envAdaptation("off"));
-      await transport.write(set.noiseMode(mapped.simple));
-      await transport.write(set.ancSetting(mapped.scene));
-    }
+    await guard(async () => {
+      if (mapped.adaptive) {
+        await transport.write(set.envAdaptation("on"));
+        await transport.write(set.noiseMode(0x01));
+      } else {
+        await transport.write(set.envAdaptation("off"));
+        await transport.write(set.noiseMode(mapped.simple));
+        await transport.write(set.ancSetting(mapped.scene));
+      }
+    });
   },
 
   setGameMode: async (on) => {
-    await transport.write(set.lowLatency(on ? "on" : "off"));
+    await guard(() => transport.write(set.lowLatency(on ? "on" : "off")));
   },
   setSleep: async (on) => {
-    await transport.write(set.sleep(on ? "on" : "off"));
+    await guard(() => transport.write(set.sleep(on ? "on" : "off")));
   },
   setSpatial: async (on) => {
-    await transport.write(set.spatial(on ? "on" : "off"));
+    await guard(() => transport.write(set.spatial(on ? "on" : "off")));
   },
   setInEar: async (on) => {
-    await transport.write(set.inEar(on ? "on" : "off"));
+    await guard(() => transport.write(set.inEar(on ? "on" : "off")));
   },
   setWear: async (partial) => {
     const wear = { ...get().device.wear, ...partial };
-    await transport.write(set.wear(wear));
+    await guard(() => transport.write(set.wear(wear)));
   },
   setEq: async (named) => {
-    await transport.write(set.eqV2(named.preset));
-    if (transport instanceof MockTransport) transport.applyLocalEqName(named.name);
+    const ok = await guard(() => transport.write(set.eqV2(named.preset)));
+    if (ok && transport instanceof MockTransport) transport.applyLocalEqName(named.name);
   },
   setEqGains: async (gains, name = "Custom") => {
     const preset = presetFromGains(gains);
-    await transport.write(set.eqV2(preset));
-    if (transport instanceof MockTransport) transport.applyLocalEqName(name);
+    const ok = await guard(() => transport.write(set.eqV2(preset)));
+    if (ok && transport instanceof MockTransport) transport.applyLocalEqName(name);
   },
   setBinding: async (keyId, funId) => {
     const bindings: KeyBinding[] = get().device.bindings.map((b) =>
       b.keyId === keyId ? { keyId, funId } : b,
     );
-    await transport.writeDirect(CHAR.keyFunctionV2, encodeKeyFunctionDirect(bindings));
+    await guard(() => transport.writeDirect(CHAR.keyFunctionV2, encodeKeyFunctionDirect(bindings)));
   },
   setSoundBalance: async (value) => {
-    await transport.write(set.soundBalance(value));
+    await guard(() => transport.write(set.soundBalance(value)));
   },
   findChime: async (side) => {
-    await transport.write(set.lightFlash(true));
-    await transport.write(set.tonePlay(side === "left" ? 1 : side === "right" ? 2 : 3));
+    const ok = await guard(async () => {
+      await transport.write(set.lightFlash(true));
+      await transport.write(set.tonePlay(side === "left" ? 1 : side === "right" ? 2 : 3));
+    });
+    if (!ok) return;
     setState({
       toast: {
         id: toastSeq++,
@@ -400,7 +435,9 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
   },
   media: async (action) => {
     const map = { play: 0x01, pause: 0x02, prev: 0x03, next: 0x04 } as const;
-    await transport.write(set.music(map[action]));
+    // MusicControl (0x04) is not in the documented trusted write table; the
+    // policy denies it until issue #6/#13 provide an evidenced host path (MPRIS).
+    await guard(() => transport.write(set.music(map[action])));
   },
   exportConfig: () => {
     const s = get();
@@ -454,7 +491,8 @@ export const useHub = create<HubState & HubActions>((setState, get) => ({
     setState({ cliHistory: [...get().cliHistory, `> ${line}`, out].slice(-200) });
     return out;
   },
-}));
+  };
+});
 
 async function runCliLine(line: string, get: () => HubState & HubActions): Promise<string> {
   const parts = line.trim().split(/\s+/);
