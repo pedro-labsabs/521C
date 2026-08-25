@@ -2,6 +2,17 @@ import { create } from "zustand";
 import { CHAR, DESTRUCTIVE_CMDS, encodeKeyFunctionDirect, set } from "./protocol";
 import { WriteDeniedError } from "./policy";
 import {
+  CONFIG_SCHEMA_VERSION,
+  buildExport,
+  loadPersistedConfig,
+  parseImport,
+  savePersistedConfig,
+  summarizeErrors,
+  type ExternalConfig,
+  type ParseResult,
+  type PersistedConfig,
+} from "./config-schema";
+import {
   CHIME_COOLDOWN_MS,
   chimeToneId,
   evaluateChimePreflight,
@@ -35,51 +46,20 @@ export type HubView =
   | "cli"
   | "developer";
 
-export type ThemeMode = "dark" | "light";
+// Theme/notification types now live in the versioned config schema (issue #11);
+// re-exported so existing imports keep working.
+export type { ThemeMode, NotifyPrefs } from "./config-schema";
+import type { NotifyPrefs, ThemeMode } from "./config-schema";
 
-export type NotifyPrefs = {
-  connected: boolean;
-  disconnected: boolean;
-  batteryLow: boolean;
-  batteryCritical: boolean;
-  batteryUneven: boolean;
-  profileSwitch: boolean;
-};
+const browserStorage: import("./config-schema").ConfigStorage | undefined =
+  typeof localStorage === "undefined" ? undefined : localStorage;
 
-const STORAGE_KEY = "521c-config-v1";
-
-type Persisted = {
-  theme: ThemeMode;
-  notify: NotifyPrefs;
-  hideMac: boolean;
-  customEq: NamedEq[];
-  customProfiles: SmartProfile[];
-  activeProfileId: string;
-  autoGame: boolean;
-  autoGameKeyword: string;
-  sleepTimerMin: number;
-  lastSeen: DeviceLiveState["lastSeen"];
-};
-
-function loadPersisted(): Partial<Persisted> {
-  if (typeof localStorage === "undefined") return {};
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Persisted) : {};
-  } catch {
-    return {};
-  }
-}
-
-function savePersisted(p: Persisted) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
-  } catch {
-    /* ignore quota */
-  }
-}
-
-const persisted = loadPersisted();
+/**
+ * Load + validate + migrate persisted config (issue #11). Corrupt or newer payloads
+ * fall back to defaults without destroying stored data.
+ */
+const persistedLoad = loadPersistedConfig(browserStorage);
+const persisted: PersistedConfig = persistedLoad.config;
 
 export type HubState = {
   view: HubView;
@@ -153,7 +133,11 @@ export type HubActions = {
   media: (action: "play" | "pause" | "prev" | "next") => Promise<void>;
   runCli: (line: string) => Promise<string>;
   exportConfig: () => string;
-  importConfig: (json: string) => void;
+  /**
+   * Validate and apply an imported config atomically (issue #11). Returns structured
+   * errors without touching state when the file is invalid.
+   */
+  importConfig: (json: string) => ParseResult<ExternalConfig>;
   exportDiagnostics: () => string;
   setNotify: (partial: Partial<NotifyPrefs>) => void;
   setHideMac: (hide: boolean) => void;
@@ -180,7 +164,8 @@ let toastSeq = 1;
 
 function persistFrom(get: () => HubState) {
   const s = get();
-  savePersisted({
+  savePersistedConfig(browserStorage, {
+    schema: CONFIG_SCHEMA_VERSION,
     theme: s.theme,
     notify: s.notify,
     hideMac: s.hideMac,
@@ -273,28 +258,23 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
 
   return {
   view: "overview",
-  theme: persisted.theme ?? "dark",
+  // Persisted config is fully validated by the schema layer (issue #11); no fallbacks
+  // are needed here because loadPersistedConfig always returns a complete config.
+  theme: persisted.theme,
   transportKind: "mock",
   scanning: false,
   discovered: [],
-  device: createInitialState({ lastSeen: persisted.lastSeen ?? null }),
+  device: createInitialState({ lastSeen: persisted.lastSeen }),
   log: [],
   toast: null,
-  notify: persisted.notify ?? {
-    connected: true,
-    disconnected: true,
-    batteryLow: true,
-    batteryCritical: true,
-    batteryUneven: true,
-    profileSwitch: true,
-  },
-  hideMac: persisted.hideMac ?? true,
-  customEq: persisted.customEq ?? [],
-  customProfiles: persisted.customProfiles ?? [],
-  activeProfileId: persisted.activeProfileId ?? "music",
-  autoGame: persisted.autoGame ?? false,
-  autoGameKeyword: persisted.autoGameKeyword ?? "game",
-  sleepTimerMin: persisted.sleepTimerMin ?? 30,
+  notify: persisted.notify,
+  hideMac: persisted.hideMac,
+  customEq: persisted.customEq,
+  customProfiles: persisted.customProfiles,
+  activeProfileId: persisted.activeProfileId,
+  autoGame: persisted.autoGame,
+  autoGameKeyword: persisted.autoGameKeyword,
+  sleepTimerMin: persisted.sleepTimerMin,
   eqAb: null,
   systemEqOn: false,
   systemEqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -617,33 +597,49 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     await guard(() => transport.write(set.music(map[action])));
   },
   exportConfig: () => {
+    // Portable fields only (issue #11): local-only fields (hideMac, sleepTimerMin) and
+    // runtime state (lastSeen, device identifiers, log) are excluded by the privacy
+    // contract. buildExport stamps the schema version.
     const s = get();
-    return JSON.stringify(
-      {
-        theme: s.theme,
-        notify: s.notify,
-        customEq: s.customEq,
-        customProfiles: s.customProfiles,
-        activeProfileId: s.activeProfileId,
-        autoGame: s.autoGame,
-        autoGameKeyword: s.autoGameKeyword,
-      },
-      null,
-      2,
-    );
+    return buildExport({
+      schema: CONFIG_SCHEMA_VERSION,
+      theme: s.theme,
+      notify: s.notify,
+      customEq: s.customEq,
+      customProfiles: s.customProfiles,
+      activeProfileId: s.activeProfileId,
+      autoGame: s.autoGame,
+      autoGameKeyword: s.autoGameKeyword,
+    });
   },
   importConfig: (json) => {
-    const data = JSON.parse(json) as Partial<Persisted>;
+    // Validate atomically before touching any state (issue #11). An invalid file is
+    // rejected with structured errors and no partial mutation; the failure is surfaced
+    // as a toast as well as in the returned result.
+    const result = parseImport(json);
+    if (!result.ok) {
+      setState({
+        toast: {
+          id: toastSeq++,
+          title: "Import rejected",
+          body: summarizeErrors(result.errors),
+        },
+      });
+      return result;
+    }
+    const cfg = result.value;
     setState({
-      theme: data.theme ?? get().theme,
-      notify: data.notify ?? get().notify,
-      customEq: data.customEq ?? get().customEq,
-      customProfiles: data.customProfiles ?? get().customProfiles,
-      activeProfileId: data.activeProfileId ?? get().activeProfileId,
-      autoGame: data.autoGame ?? get().autoGame,
-      autoGameKeyword: data.autoGameKeyword ?? get().autoGameKeyword,
+      theme: cfg.theme,
+      notify: cfg.notify,
+      customEq: cfg.customEq,
+      customProfiles: cfg.customProfiles,
+      activeProfileId: cfg.activeProfileId,
+      autoGame: cfg.autoGame,
+      autoGameKeyword: cfg.autoGameKeyword,
+      toast: { id: toastSeq++, title: "Imported", body: "Configuration loaded and validated." },
     });
     persistFrom(get);
+    return result;
   },
   exportDiagnostics: () => {
     const s = get();

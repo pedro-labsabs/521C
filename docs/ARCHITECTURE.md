@@ -48,10 +48,30 @@ Device writes pass through a per-connection command scheduler
 optional bounded read-back reconciliation distinguishes "sent" from "confirmed". Queued work
 is cancelled on disconnect. The scheduler is event-driven — no permanent polling loop.
 
-## Persistence
+## Persistence & configuration schema
 
-Browser: `localStorage` key `521c-config-v1` (theme, profiles, notify, EQ).  
-Native target: `~/.config/521c/` via XDG.
+Configuration is governed by a versioned, validated schema
+(`src/lib/qcy/config-schema.ts`, issue #11). External data — localStorage payloads and
+import files — is never trusted: it is validated field-by-field (shapes, enums, numeric
+bounds, array lengths, string sizes, profile/EQ identifiers) before it can touch
+application state, and invalid input is rejected atomically with structured errors.
+
+Every field belongs to exactly one class:
+
+| Class | Fields | Persisted | Exported |
+| --- | --- | --- | --- |
+| Portable | theme, notify, customEq, customProfiles, activeProfileId, autoGame, autoGameKeyword | yes | yes |
+| Local-only | hideMac, sleepTimerMin, lastSeen | yes | **no** |
+| Runtime-only | connection/telemetry, log, toasts, experimental opt-in, pending chime | no | no |
+
+The schema version travels inside the payload (`schema` field), not the storage key, so
+future versions migrate instead of relying on key suffixes. The current browser key is
+`521c-config`; the legacy `521c-config-v1` payload is migrated on load and left in place
+as a fallback. Corrupt or newer-than-supported payloads fall back to defaults without
+destroying stored data. Imported profiles never carry `builtin` trust.
+
+Browser: `localStorage` via the schema layer.  
+Native target: `~/.config/521c/` via XDG (issue #8), reusing this same JSON contract.
 
 ## Performance notes (native target)
 
