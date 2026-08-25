@@ -21,7 +21,24 @@ this" with "this build implements it".
 | --- | --- |
 | Mock HT08 | Default. Full battery/ANC/EQ/events without hardware |
 | Web Bluetooth | Chromium + user gesture, real buds |
-| BlueZ/zbus | Native Linux crate (not runnable in this preview) |
+| BlueZ/zbus | Native Linux (`native/crates/qcy-transport`), system D-Bus GATT |
+
+## Native transport (`native/crates/qcy-transport`)
+
+The native transport sits above `qcy-protocol` (framing/codecs) and below the CLI/GUI.
+A single `Transport` trait has two backends:
+
+- `mock::MockTransport` — deterministic, hardware-free; the default for tests and dev.
+- `bluez::BlueZTransport` — talks to the system BlueZ stack over the D-Bus GATT API
+  (`org.bluez` / `GattCharacteristic1`). Event-driven, no root, no daemon reconfiguration.
+
+All D-Bus access is isolated behind the `bluez::BlueZBus` trait, so object-path mapping,
+discovery filtering, characteristic resolution and policy enforcement are unit-tested
+against a fake bus when no Bluetooth daemon is present. Outbound writes pass through the
+central `policy::WritePolicy` (the Rust mirror of issue #1) before reaching the wire:
+destructive opcodes (`0x01`/`0x02`/`0x03`) are never sent, unknown models stay read-only,
+and experimental opcodes need a session opt-in. The live D-Bus boundary is compiled behind
+the `bluez` Cargo feature (default on); the trait, mapping, policy and mock always build.
 
 ## Command scheduling
 

@@ -31,6 +31,31 @@ cargo test --workspace
 The CLI crate is named `five21cctl` because Cargo package names cannot start
 with a digit; the built binary keeps the contracted name `521cctl`.
 
+## Native transport & CLI (issue #7)
+
+The `native/crates/qcy-transport` crate provides the transport layer used by the
+CLI and (later) the Slint GUI. It exposes a single `Transport` trait with two
+backends: a deterministic `MockTransport` and a `BlueZTransport` that drives the
+system BlueZ stack over D-Bus GATT. All outbound writes pass through the central
+write-authorization policy before reaching the wire.
+
+The CLI (`521cctl`) defaults to the mock transport so it runs anywhere with no
+hardware. Pass `--bluez` to operate a real, explicitly selected device:
+
+```bash
+cd native
+cargo run -p five21cctl --bin 521cctl -- scan                 # mock
+cargo run -p five21cctl --bin 521cctl -- --bluez scan         # real discovery
+cargo run -p five21cctl --bin 521cctl -- --bluez status       # real readout
+cargo run -p five21cctl --bin 521cctl -- --bluez anc transparency
+```
+
+Useful flags: `--adapter hci0` selects the adapter, `--device <addr>` pins the
+target. Discovery only surfaces candidate QCY devices; a device whose model is not
+proven from its name is reported and treated as read-only. The live D-Bus boundary
+is compiled behind the `bluez` Cargo feature (default on); the transport trait,
+object mapping, policy and mock always build and are unit-tested without hardware.
+
 ## Web Bluetooth (development transport)
 
 The web app defaults to the mock transport, which is visibly labelled

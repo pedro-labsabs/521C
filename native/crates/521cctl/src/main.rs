@@ -1,105 +1,211 @@
-//! 521cctl — same command surface as the GUI core, mock transport by default.
-//! Real BlueZ/GATT I/O is intentionally out of this sandbox binary.
+//! 521cctl — CLI with the same command surface as the GUI core.
+//!
+//! Mock transport is the deliberate default (tests/dev, no hardware needed). Pass
+//! `--bluez` to operate a real, explicitly selected device through the system BlueZ
+//! stack. Outbound writes pass through the central write-authorization policy either way.
 
-use qcy_protocol::packet::{decode_packet, encode_command};
-use qcy_protocol::{BatteryCell, BatteryState, Cmd};
+use qcy_protocol::packet::encode_command;
+use qcy_protocol::Cmd;
+use qcy_transport::policy::{WritePolicy, CHAR_COMMAND_WRITE};
+use qcy_transport::{mock::MockTransport, DiscoveredDevice, Transport, TransportError};
 
-struct MockHt08 {
-    battery: BatteryState,
-    noise: u8,
-    game: bool,
-    name: &'static str,
+const CHAR_BATTERY: &str = "00000008-0000-1000-8000-00805f9b34fb";
+const CHAR_VERSION: &str = "00000007-0000-1000-8000-00805f9b34fb";
+
+struct Options {
+    bluez: bool,
+    adapter: String,
+    device: Option<String>,
 }
 
-impl MockHt08 {
-    fn new() -> Self {
-        Self {
-            battery: BatteryState {
-                left: BatteryCell {
-                    level: 82,
-                    charging: false,
-                },
-                right: BatteryCell {
-                    level: 80,
-                    charging: false,
-                },
-                case: BatteryCell {
-                    level: 94,
-                    charging: false,
-                },
-            },
-            noise: 0x01,
-            game: false,
-            name: "QCY MeloBuds Pro",
-        }
-    }
-
-    fn apply(&mut self, bytes: &[u8]) {
-        if let Ok(pkt) = decode_packet(bytes) {
-            for b in pkt.blocks {
-                match b.cmd {
-                    x if x == Cmd::NoiseCancelMode as u8 && !b.params.is_empty() => {
-                        self.noise = b.params[0];
-                    }
-                    x if x == Cmd::LowLatency as u8 && !b.params.is_empty() => {
-                        self.game = b.params[0] == 0x01;
-                    }
-                    _ => {}
-                }
+fn parse_opts<I: Iterator<Item = String>>(args: &mut I) -> (Options, Vec<String>) {
+    let mut opts = Options {
+        bluez: false,
+        adapter: "hci0".to_string(),
+        device: None,
+    };
+    let mut rest = Vec::new();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--bluez" => opts.bluez = true,
+            "--mock" => opts.bluez = false,
+            "--adapter" => opts.adapter = args.next().unwrap_or_else(|| "hci0".into()),
+            "--device" => opts.device = args.next(),
+            _ => {
+                rest.push(a);
+                rest.extend(args);
+                break;
             }
         }
     }
+    (opts, rest)
 }
 
-fn main() {
+fn build_transport(opts: &Options) -> Result<Box<dyn Transport>, TransportError> {
+    if opts.bluez {
+        build_bluez(opts)
+    } else {
+        Ok(Box::new(MockTransport::new(WritePolicy::ht08())))
+    }
+}
+
+#[cfg(feature = "bluez")]
+fn build_bluez(opts: &Options) -> Result<Box<dyn Transport>, TransportError> {
+    let bus = qcy_transport::bluez::ZbusBlueZBus::system()?;
+    let t = qcy_transport::bluez::BlueZTransport::new(Box::new(bus), WritePolicy::ht08())
+        .with_adapter(opts.adapter.clone());
+    Ok(Box::new(t))
+}
+
+#[cfg(not(feature = "bluez"))]
+fn build_bluez(_opts: &Options) -> Result<Box<dyn Transport>, TransportError> {
+    Err(TransportError::Bus(
+        "built without the `bluez` feature; recompile with it enabled".into(),
+    ))
+}
+
+fn pick_device(
+    list: &[DiscoveredDevice],
+    wanted: Option<&str>,
+) -> Result<DiscoveredDevice, TransportError> {
+    if let Some(w) = wanted {
+        list.iter()
+            .find(|d| d.address.eq_ignore_ascii_case(w) || d.name == w)
+            .cloned()
+            .ok_or_else(|| TransportError::NotFound(w.to_string()))
+    } else {
+        list.first()
+            .cloned()
+            .ok_or_else(|| TransportError::NotFound("no QCY device discovered".into()))
+    }
+}
+
+fn battery_label(bytes: &[u8]) -> String {
+    let cell = |b: Option<&u8>| match b {
+        Some(v) => format!("{}%", v & 0x7f),
+        None => "--".to_string(),
+    };
+    format!(
+        "L {}  R {}  case {}",
+        cell(bytes.first()),
+        cell(bytes.get(1)),
+        cell(bytes.get(2))
+    )
+}
+
+fn firmware_label(bytes: &[u8]) -> String {
+    if bytes.len() >= 3 {
+        format!("{}.{}.{}", bytes[0], bytes[1], bytes[2])
+    } else {
+        "--".to_string()
+    }
+}
+
+fn run() -> Result<(), TransportError> {
     let mut args = std::env::args().skip(1);
-    let cmd = args.next().unwrap_or_else(|| "help".into());
-    let mut dev = MockHt08::new();
+    let (opts, rest) = parse_opts(&mut args);
+    let cmd = rest.first().cloned().unwrap_or_else(|| "help".into());
+    let backend = if opts.bluez { "bluez" } else { "mock" };
+
     match cmd.as_str() {
         "help" | "-h" | "--help" => {
-            println!(
-                "521cctl status|battery|anc <mode>|game-mode <on|off>\nIndependent. Not affiliated with QCY."
-            );
+            println!("521cctl [--mock|--bluez] [--adapter hci0] [--device <addr>] <command>");
+            println!("  scan                     list candidate QCY devices");
+            println!("  connect [<addr>]         connect and resolve characteristics");
+            println!("  status                   connect + battery/firmware readout");
+            println!("  battery                  connect + battery readout");
+            println!("  anc <off|on|transparency>");
+            println!("  game-mode <on|off>");
+            println!("Mock is the deliberate default; --bluez targets a real device.");
+            println!("Independent. Not affiliated with QCY.");
         }
-        "status" => {
-            println!("{}  HT08  mock", dev.name);
-            println!(
-                "noise=0x{n:02x} game={g}  L={l}% R={r}% case={c}%",
-                n = dev.noise,
-                g = if dev.game { "on" } else { "off" },
-                l = dev.battery.left.level,
-                r = dev.battery.right.level,
-                c = dev.battery.case.level
-            );
+        "scan" => {
+            let mut t = build_transport(&opts)?;
+            let list = t.scan()?;
+            if list.is_empty() {
+                println!("no QCY devices discovered ({backend})");
+            }
+            for d in &list {
+                let model = if d.model_known {
+                    "HT08"
+                } else {
+                    "unknown-model (read-only)"
+                };
+                let rssi = d
+                    .rssi
+                    .map(|r| format!("{r} dBm"))
+                    .unwrap_or_else(|| "?".into());
+                println!("{}  {}  {}  {rssi}", d.address, d.name, model);
+            }
         }
-        "battery" => {
-            println!(
-                "L {}%  R {}%  case {}%",
-                dev.battery.left.level, dev.battery.right.level, dev.battery.case.level
-            );
+        "connect" => {
+            let mut t = build_transport(&opts)?;
+            let list = t.scan()?;
+            let dev = pick_device(
+                &list,
+                rest.get(1).map(|s| s.as_str()).or(opts.device.as_deref()),
+            )?;
+            t.connect(&dev.address)?;
+            println!("connected to {} ({}) via {backend}", dev.name, dev.address);
+        }
+        "status" | "battery" => {
+            let mut t = build_transport(&opts)?;
+            let list = t.scan()?;
+            let dev = pick_device(&list, opts.device.as_deref())?;
+            if !dev.model_known {
+                println!("note: model not proven; treating as read-only");
+            }
+            t.connect(&dev.address)?;
+            let battery = t.read(CHAR_BATTERY)?;
+            println!("{}  {}  {}", dev.name, dev.address, backend);
+            println!("battery: {}", battery_label(&battery));
+            if cmd == "status" {
+                match t.read(CHAR_VERSION) {
+                    Ok(fw) => println!("firmware: {}", firmware_label(&fw)),
+                    Err(e) => println!("firmware: unavailable ({e})"),
+                }
+            }
         }
         "anc" => {
-            let mode = args.next().unwrap_or_else(|| "on".into());
-            let v = match mode.as_str() {
+            let mode = rest.get(1).cloned().unwrap_or_else(|| "on".into());
+            let v: u8 = match mode.as_str() {
                 "off" => 0x00,
-                "adaptive" | "on" | "anc" => 0x01,
                 "transparency" => 0x03,
                 _ => 0x01,
             };
-            let pkt = encode_command(Cmd::NoiseCancelMode as u8, &[v]).unwrap();
-            dev.apply(&pkt);
-            println!("anc {mode} -> 0x{v:02x}  frame={pkt:02x?}");
+            let mut t = build_transport(&opts)?;
+            let list = t.scan()?;
+            let dev = pick_device(&list, opts.device.as_deref())?;
+            t.connect(&dev.address)?;
+            let frame = encode_command(Cmd::NoiseCancelMode as u8, &[v])
+                .map_err(|e| TransportError::InvalidArgument(format!("{e:?}")))?;
+            t.write(&frame)?;
+            println!("anc {mode} -> 0x{v:02x}");
         }
         "game-mode" => {
-            let on = args.next().as_deref() != Some("off");
-            let pkt =
-                encode_command(Cmd::LowLatency as u8, &[if on { 0x01 } else { 0x02 }]).unwrap();
-            dev.apply(&pkt);
+            let on = rest.get(1).map(|s| s.as_str()) != Some("off");
+            let mut t = build_transport(&opts)?;
+            let list = t.scan()?;
+            let dev = pick_device(&list, opts.device.as_deref())?;
+            t.connect(&dev.address)?;
+            let frame = encode_command(Cmd::LowLatency as u8, &[if on { 0x01 } else { 0x02 }])
+                .map_err(|e| TransportError::InvalidArgument(format!("{e:?}")))?;
+            t.write(&frame)?;
             println!("game-mode {}", if on { "on" } else { "off" });
         }
         other => {
             eprintln!("unknown command: {other}");
             std::process::exit(1);
         }
+    }
+    // Keep the command characteristic referenced so the allowlist is exercised in builds.
+    let _ = CHAR_COMMAND_WRITE;
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }
