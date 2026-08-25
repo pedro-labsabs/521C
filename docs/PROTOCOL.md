@@ -4,6 +4,35 @@ Source: public reverse-engineering of QCY earphone GATT traffic, cross-checked a
 
 Byte-level framing, advertisement, battery and firmware behavior are pinned by the shared conformance corpus at `conformance/protocol_vectors.json` (consumed by both the TypeScript and Rust test suites). Add a vector there before changing a codec or enabling a write path; see `conformance/README.md`.
 
+## Evidence and trust levels
+
+Every opcode and GATT UUID that remains in this repository is recorded in the
+canonical evidence ledger at `src/lib/qcy/protocol/evidence.ts`. An opcode being
+present in the `Cmd` catalog is **not** by itself enough to make it writable.
+
+Each entry records a provenance **evidence class** and a 521C **trust level**:
+
+| Evidence class | Meaning |
+| --- | --- |
+| `protocol-doc` | Documented in this file from public reverse-engineering. |
+| `hardware-capture` | Observed on real hardware (strongest). |
+| `community-catalog` | Community opcode list — a research lead, not proof. |
+| `official-app` | Feature exists in the official app — not proof of a Linux command. |
+
+| Trust level | Meaning |
+| --- | --- |
+| `write-supported` | Safe write enabled for the HT08 profile. |
+| `write-experimental` | Write enabled only behind a session opt-in. |
+| `read` | Read-back / status only. |
+| `catalog-only` | Known entry, not writable (insufficient evidence). |
+| `destructive` | Forbidden; never written by unattended automation. |
+
+The central write policy (`src/lib/qcy/policy.ts`) derives the HT08 writable set
+directly from this ledger, and `evidence.test.ts` fails if a trusted write lacks a
+sufficient evidence entry or if a community/official-app opcode is marked writable.
+To promote a command, add real evidence and raise its trust level in the ledger —
+do not edit the write policy allowlist by hand.
+
 ## Discovery
 
 - Manufacturer company ID: `0x521c`

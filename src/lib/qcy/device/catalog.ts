@@ -1,7 +1,10 @@
 import type { DeviceCapabilities } from "./capabilities";
 import { HT08_CAPABILITIES } from "./capabilities";
-import { Cmd } from "../protocol/types";
-import { CHAR } from "../protocol/uuids";
+import {
+  directWriteUuids,
+  experimentalWriteOpcodes,
+  supportedWriteOpcodes,
+} from "../protocol/evidence";
 
 /**
  * Per-profile write authorization surface consumed by the central policy in
@@ -37,31 +40,17 @@ export type QcyDeviceProfile = {
 };
 
 /**
- * HT08 trusted write surface. Opcodes here are the documented, app-used writes
- * from docs/PROTOCOL.md; experimental opcodes require a session opt-in to enable.
- * Opcodes present in the community catalog but not in the documented trusted
- * table (e.g. MusicControl 0x04, Volume 0x08, NoiseValue 0x07, Rename 0x18) are
- * intentionally excluded until issue #6 records sufficient evidence.
+ * HT08 trusted write surface, derived from the canonical evidence ledger
+ * (`src/lib/qcy/protocol/evidence.ts`). An opcode is writable only if the ledger
+ * records it as `write-supported` (or `write-experimental` behind a session
+ * opt-in). Opcodes present in the community catalog but not evidenced for HT08
+ * (e.g. MusicControl 0x04, Volume 0x08, NoiseValue 0x07, Rename 0x18) stay
+ * `catalog-only` and are therefore not writable.
  */
 const HT08_WRITE_POLICY: DeviceWritePolicy = {
-  supportedOpcodes: new Set<number>([
-    Cmd.NoiseCancelMode,
-    Cmd.AncSetting,
-    Cmd.LowLatency,
-    Cmd.InEarDetection,
-    Cmd.SleepMode,
-    Cmd.SoundBalance,
-    Cmd.LightFlash,
-    Cmd.TonePlay,
-    Cmd.EqParamsV2,
-    Cmd.WearingDetection,
-  ]),
-  experimentalOpcodes: new Set<number>([
-    Cmd.EnvAdaptation,
-    Cmd.SpatialAudio,
-    Cmd.Ldac,
-  ]),
-  directChars: new Set<string>([CHAR.keyFunctionV2, CHAR.eqDirect]),
+  supportedOpcodes: supportedWriteOpcodes(),
+  experimentalOpcodes: experimentalWriteOpcodes(),
+  directChars: directWriteUuids(),
 };
 
 export const HT08_PROFILE: QcyDeviceProfile = {
