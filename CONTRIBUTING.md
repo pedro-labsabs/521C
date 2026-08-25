@@ -4,6 +4,7 @@ Read `AGENTS.md` before changing this repository. For long-running autonomous wo
 
 Process documents:
 
+- `docs/README.md` — documentation index: each document's role and authority, terminology, sync rules;
 - `docs/GOVERNANCE.md` — review/merge standards, contribution boundaries, release/versioning policy, maintainer checklist;
 - `docs/TRIAGE.md` — labels, milestones and triage conventions;
 - `SECURITY.md` — security/safety reporting.

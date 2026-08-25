@@ -33,7 +33,7 @@ The autonomous plan gives the implementation agent broad authority to make ordin
 - Host-side smart profiles and diagnostics
 - Mock transport for development without hardware
 
-These are current implementation surfaces, not a claim that every item is already verified end-to-end on real HT08 hardware. The support/evidence model and open issues remain authoritative for release readiness.
+These are current implementation surfaces, not a claim that every item is already verified end-to-end on real HT08 hardware. The per-feature readiness matrix in `docs/SUPPORTED_DEVICES.md` is canonical; the support/evidence model and open issues remain authoritative for release readiness.
 
 Every capability keeps four truths separate (implemented in
 `src/lib/qcy/device/capabilities.ts`), so the UI, CLI and docs can never confuse "the

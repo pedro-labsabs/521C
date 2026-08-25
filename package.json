@@ -12,6 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "audit:network": "node scripts/audit-network.mjs",
+    "docs:check": "node scripts/check-docs.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint .",
