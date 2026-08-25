@@ -7,12 +7,19 @@ use qcy_protocol::packet::decode_packet;
 use crate::policy::{WritePolicy, CHAR_COMMAND_WRITE};
 use crate::{DiscoveredDevice, Transport, TransportError};
 
+/// Address of the deterministic mock HT08 device.
+pub const MOCK_HT08_ADDRESS: &str = "F8:5C:7D:12:08:08";
+
 /// Mock HT08 device. Mirrors the web mock closely enough for CLI/dev work and tests.
 #[derive(Debug)]
 pub struct MockTransport {
     policy: WritePolicy,
     experimental_opt_in: bool,
     connected: bool,
+    /// Model evidence for the connected address. Only the mock HT08 address is a
+    /// proven model; any other address connects but stays read-only, mirroring the
+    /// unknown-device invariant of the real transports.
+    connected_model_known: bool,
     battery: Vec<u8>,
     firmware: Vec<u8>,
     direct: HashMap<String, Vec<u8>>,
@@ -26,6 +33,7 @@ impl MockTransport {
             policy,
             experimental_opt_in: false,
             connected: false,
+            connected_model_known: false,
             battery: vec![0x52, 0x50, 0x5E], // 82 / 80 / 94
             firmware: vec![1, 4, 2, 1, 4, 2],
             direct: HashMap::new(),
@@ -41,20 +49,22 @@ impl MockTransport {
 impl Transport for MockTransport {
     fn scan(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
         Ok(vec![DiscoveredDevice {
-            address: "F8:5C:7D:12:08:08".to_string(),
+            address: MOCK_HT08_ADDRESS.to_string(),
             name: "QCY MeloBuds Pro".to_string(),
             rssi: Some(-48),
             model_known: true,
         }])
     }
 
-    fn connect(&mut self, _address: &str) -> Result<(), TransportError> {
+    fn connect(&mut self, address: &str) -> Result<(), TransportError> {
         self.connected = true;
+        self.connected_model_known = address == MOCK_HT08_ADDRESS;
         Ok(())
     }
 
     fn disconnect(&mut self) -> Result<(), TransportError> {
         self.connected = false;
+        self.connected_model_known = false;
         Ok(())
     }
 
@@ -78,6 +88,11 @@ impl Transport for MockTransport {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
+        if !self.connected_model_known {
+            return Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice,
+            ));
+        }
         self.policy
             .authorize_frame(bytes, self.experimental_opt_in)
             .map_err(TransportError::Denied)?;
@@ -90,6 +105,11 @@ impl Transport for MockTransport {
     fn write_direct(&mut self, char_uuid: &str, bytes: &[u8]) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
+        }
+        if !self.connected_model_known {
+            return Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice,
+            ));
         }
         self.policy
             .authorize_direct(char_uuid, bytes, self.experimental_opt_in)
@@ -154,6 +174,28 @@ mod tests {
         let frame = encode_command(0x01, &[]).unwrap();
         assert!(matches!(t.write(&frame), Err(TransportError::Denied(_))));
         assert!(t.tx_log.is_empty());
+    }
+
+    #[test]
+    fn unknown_device_connects_but_stays_read_only() {
+        let mut t = MockTransport::new(WritePolicy::ht08());
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        match t.write(&frame) {
+            Err(TransportError::Denied(crate::policy::Denial::ReadOnlyDevice)) => {}
+            other => panic!("expected ReadOnlyDevice denial, got {other:?}"),
+        }
+        assert!(t.tx_log.is_empty());
+        // Read-only still permits status reads.
+        assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn disconnect_clears_model_evidence() {
+        let mut t = connected_mock();
+        t.disconnect().unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert_eq!(t.write(&frame), Err(TransportError::Disconnected));
     }
 
     #[test]
