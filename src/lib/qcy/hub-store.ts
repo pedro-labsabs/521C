@@ -8,6 +8,7 @@ import {
   type ChimePreflight,
   type ChimeSide,
 } from "./find-preflight";
+import { CommandScheduler, type CommandResult } from "./scheduler";
 import type { AncScene, KeyBinding } from "./protocol/types";
 import { DEVICE_EQ_PRESETS, type NamedEq, presetFromGains } from "./eq-presets";
 import { BUILTIN_PROFILES, type NoiseUiMode, type SmartProfile } from "./smart-profiles";
@@ -110,19 +111,30 @@ export type HubState = {
   chimeBlockedUntil: number;
 };
 
+/** Structured per-step outcome of applying a smart profile (issue #10). */
+export type ProfileStepResult = { step: string; ok: boolean };
+export type ProfileApplyResult = {
+  profileId: string;
+  profileName: string;
+  steps: ProfileStepResult[];
+  ok: boolean;
+  /** Observed device state after application, for reconciliation. */
+  observed: { noiseMode: number; gameMode: boolean; inEar: boolean; eqName: string };
+};
+
 export type HubActions = {
   setView: (view: HubView) => void;
   setTheme: (theme: ThemeMode) => void;
   scan: () => Promise<void>;
   connect: (id: string, kind?: TransportKind) => Promise<void>;
   disconnect: () => Promise<void>;
-  setNoise: (mode: NoiseUiMode, level?: number) => Promise<void>;
-  setGameMode: (on: boolean) => Promise<void>;
+  setNoise: (mode: NoiseUiMode, level?: number) => Promise<boolean>;
+  setGameMode: (on: boolean) => Promise<boolean>;
   setSleep: (on: boolean) => Promise<void>;
   setSpatial: (on: boolean) => Promise<void>;
-  setInEar: (on: boolean) => Promise<void>;
+  setInEar: (on: boolean) => Promise<boolean>;
   setWear: (partial: Partial<DeviceLiveState["wear"]>) => Promise<void>;
-  setEq: (named: NamedEq) => Promise<void>;
+  setEq: (named: NamedEq) => Promise<boolean>;
   setEqGains: (gains: number[], name?: string) => Promise<void>;
   setBinding: (keyId: number, funId: number) => Promise<void>;
   setSoundBalance: (value: number) => Promise<void>;
@@ -132,7 +144,7 @@ export type HubActions = {
   cancelChime: () => void;
   /** Transmit the staged chime only after confirmation passes all safety gates. */
   confirmChime: () => Promise<void>;
-  applyProfile: (id: string) => Promise<void>;
+  applyProfile: (id: string) => Promise<ProfileApplyResult | null>;
   saveCustomProfile: (profile: SmartProfile) => void;
   media: (action: "play" | "pause" | "prev" | "next") => Promise<void>;
   runCli: (line: string) => Promise<string>;
@@ -153,6 +165,13 @@ export type HubActions = {
 };
 
 let transport: QcyTransport = new MockTransport();
+/**
+ * Per-connection command scheduler (issue #10). Serializes device writes and coalesces
+ * high-frequency latest-value controls. Recreated on connect; queued work is cancelled
+ * on disconnect.
+ */
+let scheduler = new CommandScheduler();
+let writeSeq = 0;
 let toastSeq = 1;
 
 function persistFrom(get: () => HubState) {
@@ -211,19 +230,41 @@ function maskMac(mac: string, hide: boolean): string {
 export const useHub = create<HubState & HubActions>((setState, get) => {
   // Route a device write and surface policy denials as a toast instead of an
   // unhandled rejection. Returns true when the write was authorized and sent.
-  const guard = async (write: () => Promise<void>): Promise<boolean> => {
-    try {
-      await write();
-      return true;
-    } catch (err) {
-      if (err instanceof WriteDeniedError) {
-        setState({
-          toast: { id: toastSeq++, title: "Write blocked", body: err.denial.message },
-        });
-        return false;
-      }
-      throw err;
+  // Routes device writes through the per-connection scheduler (issue #10): serialized,
+  // optionally coalesced, and mapped to structured results. Returns true when the write
+  // was authorized and sent/confirmed; false when denied, superseded by a newer coalesced
+  // value, cancelled, or errored.
+  const guard = async (
+    write: () => Promise<void>,
+    opts?: { key?: string; coalesce?: boolean },
+  ): Promise<boolean> => {
+    const result = await scheduler.schedule(
+      { key: opts?.key ?? `write-${++writeSeq}`, coalesce: opts?.coalesce ?? false },
+      async (): Promise<CommandResult> => {
+        try {
+          await write();
+          return { status: "sent" };
+        } catch (err) {
+          if (err instanceof WriteDeniedError) {
+            return { status: "denied", message: err.denial.message };
+          }
+          throw err;
+        }
+      },
+    );
+    if (result.status === "denied") {
+      setState({
+        toast: { id: toastSeq++, title: "Write blocked", body: result.message ?? "" },
+      });
+      return false;
     }
+    if (result.status === "error") {
+      setState({
+        toast: { id: toastSeq++, title: "Write failed", body: result.message ?? "Unknown error" },
+      });
+      return false;
+    }
+    return result.status === "sent" || result.status === "confirmed";
   };
 
   return {
@@ -326,6 +367,10 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   },
 
   connect: async (id, kind) => {
+    // A new connection gets a fresh scheduler; queued work from a previous connection
+    // is cancelled rather than replayed against a different device (issue #10).
+    scheduler.dispose();
+    scheduler = new CommandScheduler();
     if (kind && kind !== get().transportKind) {
       transport = kind === "web-bluetooth" ? new WebBluetoothTransport() : new MockTransport();
       // A fresh transport starts a fresh session: experimental opt-in resets.
@@ -351,6 +396,7 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
         setState({ log: [...get().log, entry].slice(-400) });
       },
       onDisconnected: () => {
+        scheduler.cancelQueued();
         setState({ device: { ...get().device, connected: false, connecting: false } });
         if (get().notify.disconnected) {
           setState({ toast: { id: toastSeq++, title: "Disconnected", body: get().device.name } });
@@ -365,13 +411,14 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   },
 
   disconnect: async () => {
+    scheduler.cancelQueued("disconnect requested");
     await transport.disconnect();
   },
 
   setNoise: async (mode, level) => {
     const lv = level ?? (mode === "transparency" ? get().device.ancScene.subScene : get().device.ancScene.subScene);
     const mapped = noiseToScene(mode, lv);
-    await guard(async () => {
+    return guard(async () => {
       if (mapped.adaptive) {
         await transport.write(set.envAdaptation("on"));
         await transport.write(set.noiseMode(0x01));
@@ -380,11 +427,11 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
         await transport.write(set.noiseMode(mapped.simple));
         await transport.write(set.ancSetting(mapped.scene));
       }
-    });
+    }, { key: "noise", coalesce: true });
   },
 
   setGameMode: async (on) => {
-    await guard(() => transport.write(set.lowLatency(on ? "on" : "off")));
+    return guard(() => transport.write(set.lowLatency(on ? "on" : "off")));
   },
   setSleep: async (on) => {
     await guard(() => transport.write(set.sleep(on ? "on" : "off")));
@@ -393,7 +440,7 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     await guard(() => transport.write(set.spatial(on ? "on" : "off")));
   },
   setInEar: async (on) => {
-    await guard(() => transport.write(set.inEar(on ? "on" : "off")));
+    return guard(() => transport.write(set.inEar(on ? "on" : "off")));
   },
   setWear: async (partial) => {
     const wear = { ...get().device.wear, ...partial };
@@ -402,11 +449,17 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   setEq: async (named) => {
     const ok = await guard(() => transport.write(set.eqV2(named.preset)));
     if (ok && transport instanceof MockTransport) transport.applyLocalEqName(named.name);
+    return ok;
   },
   setEqGains: async (gains, name = "Custom") => {
     const preset = presetFromGains(gains);
-    const ok = await guard(() => transport.write(set.eqV2(preset)));
-    if (ok && transport instanceof MockTransport) transport.applyLocalEqName(name);
+    await guard(
+      async () => {
+        await transport.write(set.eqV2(preset));
+        if (transport instanceof MockTransport) transport.applyLocalEqName(name);
+      },
+      { key: "eq", coalesce: true },
+    );
   },
   setBinding: async (keyId, funId) => {
     const bindings: KeyBinding[] = get().device.bindings.map((b) =>
@@ -415,7 +468,7 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     await guard(() => transport.writeDirect(CHAR.keyFunctionV2, encodeKeyFunctionDirect(bindings)));
   },
   setSoundBalance: async (value) => {
-    await guard(() => transport.write(set.soundBalance(value)));
+    await guard(() => transport.write(set.soundBalance(value)), { key: "balance", coalesce: true });
   },
   requestChime: (side) => {
     // Preflight only: stage the decision for interactive confirmation. No TX here.
@@ -469,17 +522,46 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   applyProfile: async (id) => {
     const all = [...BUILTIN_PROFILES, ...get().customProfiles];
     const profile = all.find((p) => p.id === id);
-    if (!profile) return;
-    await get().setNoise(profile.noise, profile.noise === "transparency" ? profile.transparencyLevel : profile.ancLevel);
-    await get().setGameMode(profile.gameMode);
-    await get().setInEar(profile.wearDetection);
+    if (!profile) return null;
+    // Run the profile's device changes as sequenced steps and record each outcome
+    // (issue #10): a partial failure is reported, not silently swallowed.
+    const steps: ProfileStepResult[] = [];
+    const noiseOk = await get().setNoise(
+      profile.noise,
+      profile.noise === "transparency" ? profile.transparencyLevel : profile.ancLevel,
+    );
+    steps.push({ step: "noise", ok: noiseOk });
+    const gameOk = await get().setGameMode(profile.gameMode);
+    steps.push({ step: "gameMode", ok: gameOk });
+    const inEarOk = await get().setInEar(profile.wearDetection);
+    steps.push({ step: "wearDetection", ok: inEarOk });
     const eq = [...DEVICE_EQ_PRESETS, ...get().customEq].find((e) => e.id === profile.eqId);
-    if (eq) await get().setEq(eq);
+    if (eq) {
+      const eqOk = await get().setEq(eq);
+      steps.push({ step: "eq", ok: eqOk });
+    }
+    const ok = steps.every((s) => s.ok);
     setState({ activeProfileId: id });
     persistFrom(get);
     if (get().notify.profileSwitch) {
-      setState({ toast: { id: toastSeq++, title: "Profile", body: `${profile.name} applied` } });
+      const failed = steps.filter((s) => !s.ok).map((s) => s.step);
+      setState({
+        toast: {
+          id: toastSeq++,
+          title: ok ? "Profile" : "Profile partially applied",
+          body: ok ? `${profile.name} applied` : `${profile.name}: ${failed.join(", ")} not applied`,
+        },
+      });
     }
+    // Reconcile against the final observed device state.
+    const d = get().device;
+    return {
+      profileId: id,
+      profileName: profile.name,
+      steps,
+      ok,
+      observed: { noiseMode: d.noiseMode, gameMode: d.gameMode, inEar: d.inEar, eqName: d.eqName },
+    };
   },
   saveCustomProfile: (profile) => {
     const rest = get().customProfiles.filter((p) => p.id !== profile.id);
