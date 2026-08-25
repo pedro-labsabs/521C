@@ -34,15 +34,23 @@ The autonomous plan gives the implementation agent broad authority to make ordin
 
 These are current implementation surfaces, not a claim that every item is already verified end-to-end on real HT08 hardware. The support/evidence model and open issues remain authoritative for release readiness.
 
-Three sources of truth stay separate:
+Every capability keeps four truths separate (implemented in
+`src/lib/qcy/device/capabilities.ts`), so the UI, CLI and docs can never confuse "the
+device/protocol can do this" with "this build implements it":
 
-| Source | Meaning |
+| Truth | Question it answers |
 | --- | --- |
-| Hardware | What the device is advertised to support |
-| Protocol | What captured/public BLE behavior can prove |
-| App | What 521C actually implements and tests |
+| Hardware | Is the feature associated with this model? |
+| Protocol | Is the behavior evidenced for this model/firmware? |
+| Implementation | Does this build actually implement and test it? |
+| Write | Is it writable, experimental (opt-in), read-only, or forbidden? |
 
-A feature in the official mobile application is **not** automatically considered a supported 521C control. Unproven controls remain `experimental`, `unknown`, or `requires-protocol-research` until the capability model is further separated by issue #3.
+Deterministic rules derive what is shown, enabled, and writable from those truths. A
+feature in the official mobile application is **not** automatically a supported 521C
+control, and a protocol/catalog opcode is **not** automatically implemented. Host-side
+features (system EQ, auto game mode, codec status) stay `not-implemented` or `mock-only`
+until a real host backend exists (issue #13); they are never presented as QCY protocol
+capabilities and never generate earbud writes.
 
 ## Repository map
 

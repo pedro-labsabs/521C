@@ -89,7 +89,13 @@ export const GENERIC_QCY_PROFILE: QcyDeviceProfile = {
       k,
       k.startsWith("battery") || k === "firmware" || k === "rssi"
         ? v
-        : { state: "unknown" as const, note: "Identify the model before enabling writes." },
+        : {
+            hardware: "unknown" as const,
+            protocol: "unknown" as const,
+            implementation: "not-implemented" as const,
+            write: "read-only" as const,
+            note: "Identify the model before enabling writes.",
+          },
     ]),
   ) as DeviceCapabilities,
   readOnly: true,
