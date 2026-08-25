@@ -2,6 +2,12 @@
 
 Read `AGENTS.md` before changing this repository. For long-running autonomous work, also read `docs/PRODUCT_SPEC.md`, `docs/AUTONOMOUS_EXECUTION.md` and `docs/HOST_SAFETY.md`.
 
+Process documents:
+
+- `docs/GOVERNANCE.md` — review/merge standards, contribution boundaries, release/versioning policy, maintainer checklist;
+- `docs/TRIAGE.md` — labels, milestones and triage conventions;
+- `SECURITY.md` — security/safety reporting.
+
 ## Core rules
 
 1. Do not invent UUIDs, opcodes, vendor IDs, payload formats or capability mappings.
@@ -44,6 +50,6 @@ After reproducible dependency locking lands, use `npm ci` for clean validation e
 
 ## Autonomous agents
 
-Agents may make ordinary engineering decisions without user hand-holding when the repository contracts provide enough direction. They must still respect `docs/HOST_SAFETY.md`, use evidence rather than guesses for proprietary protocol work, and close issues only when acceptance criteria are actually proven.
+Agents may make ordinary engineering decisions without user hand-holding when the repository contracts provide enough direction. They must still respect `docs/HOST_SAFETY.md`, use evidence rather than guesses for proprietary protocol work, and close issues only when acceptance criteria are actually proven. Agent work is reviewed under the same standards as human work; see `docs/GOVERNANCE.md` §6.
 
 See `PRIME_AGENT_START.md` for the canonical autonomous delivery bootstrap.
