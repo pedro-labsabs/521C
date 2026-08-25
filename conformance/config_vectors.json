@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "comment": "Shared configuration-schema vectors (issue #11 contract, issue #8 parity). Consumed by src/lib/qcy/config-schema.conformance.test.ts and native/crates/qcy-app/tests/config_conformance.rs. Both implementations must accept the valid payloads with the expected parsed values and reject the invalid ones atomically.",
+  "valid": [
+    {
+      "name": "empty object takes documented defaults",
+      "json": {},
+      "expect": {
+        "theme": "dark",
+        "activeProfileId": "music",
+        "autoGame": false,
+        "autoGameKeyword": "game",
+        "customEqCount": 0,
+        "customProfilesCount": 0,
+        "notifyConnected": true
+      }
+    },
+    {
+      "name": "portable payload round-trips",
+      "json": {
+        "schema": 1,
+        "theme": "light",
+        "notify": {
+          "connected": false,
+          "disconnected": true,
+          "batteryLow": true,
+          "batteryCritical": true,
+          "batteryUneven": false,
+          "profileSwitch": true
+        },
+        "customEq": [
+          {
+            "id": "warm",
+            "name": "Warm",
+            "kind": "device",
+            "official": false,
+            "preset": {
+              "index": 0,
+              "masterGainDb": -1.5,
+              "bands": [
+                { "freqHz": 31, "gainDb": 2, "q": 1 },
+                { "freqHz": 62, "gainDb": 1.5, "q": 1 },
+                { "freqHz": 125, "gainDb": 1, "q": 1 },
+                { "freqHz": 250, "gainDb": 0.5, "q": 1 },
+                { "freqHz": 500, "gainDb": 0, "q": 1 },
+                { "freqHz": 1000, "gainDb": 0, "q": 1 },
+                { "freqHz": 2000, "gainDb": -0.5, "q": 1 },
+                { "freqHz": 4000, "gainDb": -1, "q": 1 },
+                { "freqHz": 8000, "gainDb": -1.5, "q": 1 },
+                { "freqHz": 16000, "gainDb": -2, "q": 1, "bandType": 1 }
+              ]
+            }
+          }
+        ],
+        "customProfiles": [
+          {
+            "id": "commute",
+            "name": "Commute",
+            "description": "ANC for the bus.",
+            "builtin": true,
+            "noise": "noisy",
+            "ancLevel": 3,
+            "transparencyLevel": 2,
+            "gameMode": false,
+            "eqId": "warm",
+            "wearDetection": true
+          }
+        ],
+        "activeProfileId": "commute",
+        "autoGame": true,
+        "autoGameKeyword": "steam"
+      },
+      "expect": {
+        "theme": "light",
+        "activeProfileId": "commute",
+        "autoGame": true,
+        "autoGameKeyword": "steam",
+        "customEqCount": 1,
+        "customProfilesCount": 1,
+        "notifyConnected": false,
+        "importedProfileBuiltin": false
+      }
+    },
+    {
+      "name": "unknown extra keys are ignored, never trusted",
+      "json": { "theme": "dark", "maliciousAdminFlag": true, "writePolicy": "allow-all" },
+      "expect": {
+        "theme": "dark",
+        "activeProfileId": "music",
+        "autoGame": false,
+        "autoGameKeyword": "game",
+        "customEqCount": 0,
+        "customProfilesCount": 0,
+        "notifyConnected": true
+      }
+    }
+  ],
+  "invalid": [
+    { "name": "non-object root", "json": [1, 2, 3] },
+    { "name": "wrong-typed theme", "json": { "theme": 42 } },
+    { "name": "unknown noise mode in profile", "json": {
+      "customProfiles": [
+        {
+          "id": "p", "name": "P", "description": "", "noise": "turbo",
+          "ancLevel": 2, "transparencyLevel": 2, "gameMode": false,
+          "eqId": "flat", "wearDetection": true
+        }
+      ]
+    }, "expectErrorPathPrefix": "customProfiles[0].noise" },
+    { "name": "out-of-range gain", "json": {
+      "customEq": [
+        {
+          "id": "x", "name": "X", "kind": "device", "official": false,
+          "preset": { "masterGainDb": 0, "bands": [
+            { "freqHz": 31, "gainDb": 99, "q": 1 },
+            { "freqHz": 62, "gainDb": 0, "q": 1 },
+            { "freqHz": 125, "gainDb": 0, "q": 1 },
+            { "freqHz": 250, "gainDb": 0, "q": 1 },
+            { "freqHz": 500, "gainDb": 0, "q": 1 },
+            { "freqHz": 1000, "gainDb": 0, "q": 1 },
+            { "freqHz": 2000, "gainDb": 0, "q": 1 },
+            { "freqHz": 4000, "gainDb": 0, "q": 1 },
+            { "freqHz": 8000, "gainDb": 0, "q": 1 },
+            { "freqHz": 16000, "gainDb": 0, "q": 1 }
+          ] }
+        }
+      ]
+    }, "expectErrorPathPrefix": "customEq[0].preset.bands[0].gainDb" },
+    { "name": "wrong band count", "json": {
+      "customEq": [
+        {
+          "id": "x", "name": "X", "kind": "device", "official": false,
+          "preset": { "masterGainDb": 0, "bands": [ { "freqHz": 31, "gainDb": 0, "q": 1 } ] }
+        }
+      ]
+    }, "expectErrorPathPrefix": "customEq[0].preset.bands" },
+    { "name": "too many custom profiles", "json": {
+      "customProfiles": "OVER_LIMIT_MARKER"
+    }, "expectErrorPathPrefix": "customProfiles", "note": "the consumer constructs 65 valid profiles; the marker is replaced programmatically" },
+    { "name": "newer schema refused", "json": { "schema": 2, "theme": "dark" }, "expectErrorPathPrefix": "schema", "storedOnly": true }
+  ]
+}

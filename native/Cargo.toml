@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qcy-protocol", "crates/qcy-transport", "crates/qcy-host", "crates/521cctl"]
+members = ["crates/qcy-protocol", "crates/qcy-transport", "crates/qcy-host", "crates/qcy-device", "crates/qcy-app", "crates/521cctl"]
 
 [profile.release]
 lto = true

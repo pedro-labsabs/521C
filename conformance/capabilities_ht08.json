@@ -1,0 +1,330 @@
+{
+  "version": 1,
+  "model": "HT08",
+  "source": "src/lib/qcy/device/capabilities.ts",
+  "capabilities": {
+    "batteryLeft": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "0x2F / char 00000008",
+      "opcode": 47
+    },
+    "batteryRight": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "0x2F / char 00000008",
+      "opcode": 47
+    },
+    "batteryCase": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "0x2F / char 00000008",
+      "opcode": 47
+    },
+    "chargingFlags": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "bit7 of battery bytes",
+      "opcode": 47
+    },
+    "firmware": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "0x30 / char 00000007",
+      "opcode": 48
+    },
+    "rssi": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "Host BLE RSSI, not GPS"
+    },
+    "ancOff": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x0C mode 0x00 / 0x17",
+      "opcode": 12
+    },
+    "ancOn": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x0C mode 0x01",
+      "opcode": 12
+    },
+    "ancAdaptive": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "experimental",
+      "note": "HT08 hardware advertises Adaptive ANC; 0x32 mapping experimental until captured on-device.",
+      "opcode": 50
+    },
+    "ancIndoor": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x17 mode 0x02 sub 1-3 (silent)",
+      "opcode": 23
+    },
+    "ancCommuting": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x17 mode 0x03 sub 1-3 (working)",
+      "opcode": 23
+    },
+    "ancNoisy": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x17 mode 0x04 sub 1-3",
+      "opcode": 23
+    },
+    "ancWind": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "Present in the official app; no public opcode isolated yet."
+    },
+    "ancLevels": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x17 subScene 1-3",
+      "opcode": 23
+    },
+    "transparency": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x0C mode 0x03 / 0x17 mode 0x0A",
+      "opcode": 12
+    },
+    "transparencyLevels": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x17 mode 0x0A sub 1-7",
+      "opcode": 23
+    },
+    "vocalEnhance": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "Reviews mention a vocal-enhance transparency mode; not a named opcode in the public table."
+    },
+    "gameMode": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x09 LowLatency",
+      "opcode": 9
+    },
+    "autoGameMode": {
+      "hardware": "unknown",
+      "protocol": "unknown",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "Host automation (qcy-host): MPRIS player-presence signal (session-bus NameOwnerChanged) + debounce + keyword allowlist, no busy polling. Device writes happen only through the central policy once the desktop app (#8) wires the controller; inactive by default, so no BLE traffic while idle. Never written to the buds by the host layer."
+    },
+    "deviceEq": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x22 / char 0000000B",
+      "opcode": 34
+    },
+    "systemEq": {
+      "hardware": "unknown",
+      "protocol": "unknown",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "Host PipeWire EQ (qcy-host): manages one user-scoped config artifact with clear create/remove lifecycle and no system-wide changes. Applying requires a PipeWire reload. Never written to the buds."
+    },
+    "eqPresets": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "Community band tables written via 0x22",
+      "opcode": 34
+    },
+    "eqCustom": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x22",
+      "opcode": 34
+    },
+    "eqPerChannel": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "0x46 / 0x47 catalog-only; not enabled.",
+      "opcode": 70
+    },
+    "touchControls": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "char 0000000D key function V2 (no frame)"
+    },
+    "wearDetection": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x06 / 0x2C",
+      "opcode": 44
+    },
+    "wearAutoPause": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x2C musicIndex",
+      "opcode": 44
+    },
+    "sleepMode": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x10",
+      "opcode": 16
+    },
+    "spatialAudio": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "experimental",
+      "note": "Opcode 0x2D documented; HT08 firmware exposure unverified.",
+      "opcode": 45
+    },
+    "multipointStatus": {
+      "hardware": "unknown",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "A2DP/HFP multipoint is a Bluetooth stack property, not a documented QCY command."
+    },
+    "multipointControl": {
+      "hardware": "unknown",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "No public enable/disable or host-list command."
+    },
+    "findChime": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x05 LightFlash / 0x3D TonePlay; interactive preflight required (#9).",
+      "opcode": 61
+    },
+    "findRssi": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "Smoothed host RSSI proximity, not GPS."
+    },
+    "findGps": {
+      "hardware": "unsupported",
+      "protocol": "unsupported",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "HT08 has no GPS."
+    },
+    "ldacToggle": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "experimental",
+      "note": "0x23; on Linux the codec is usually selected by PipeWire/BlueZ, not the earbud opcode.",
+      "opcode": 35
+    },
+    "ldacBitrate": {
+      "hardware": "unsupported",
+      "protocol": "unsupported",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "BlueZ/PipeWire do not reliably expose LDAC bitrate. Never invented."
+    },
+    "codecStatus": {
+      "hardware": "unknown",
+      "protocol": "unknown",
+      "implementation": "implemented",
+      "write": "read-only",
+      "note": "Read passively from BlueZ MediaTransport1 (codec/profile/sample rate) by qcy-host when a transport is active; fields that cannot be sourced stay unknown — never invented. The web preview shows a placeholder."
+    },
+    "rename": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "0x18 catalog-only; not in the trusted table and no app action yet.",
+      "opcode": 24
+    },
+    "firmwareOta": {
+      "hardware": "unsupported",
+      "protocol": "unsupported",
+      "implementation": "not-implemented",
+      "write": "forbidden",
+      "note": "Firmware update not yet safely supported. No flash/OTA path will be sent."
+    },
+    "inEarSensitivity": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "0x48 catalog-only; not enabled.",
+      "opcode": 72
+    },
+    "soundBalance": {
+      "hardware": "supported",
+      "protocol": "supported",
+      "implementation": "implemented",
+      "write": "writable",
+      "note": "0x16",
+      "opcode": 22
+    },
+    "earTipFit": {
+      "hardware": "supported",
+      "protocol": "unknown",
+      "implementation": "not-implemented",
+      "write": "read-only",
+      "note": "0x11 catalog-only; not enabled.",
+      "opcode": 17
+    }
+  }
+}

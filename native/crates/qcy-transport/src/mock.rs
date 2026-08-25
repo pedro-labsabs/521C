@@ -33,10 +33,6 @@ impl MockTransport {
         }
     }
 
-    pub fn set_experimental_opt_in(&mut self, on: bool) {
-        self.experimental_opt_in = on;
-    }
-
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -108,6 +104,10 @@ impl Transport for MockTransport {
             return Err(TransportError::Disconnected);
         }
         Ok(())
+    }
+
+    fn set_experimental_opt_in(&mut self, on: bool) {
+        self.experimental_opt_in = on;
     }
 }
 

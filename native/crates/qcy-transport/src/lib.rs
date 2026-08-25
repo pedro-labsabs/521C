@@ -79,4 +79,8 @@ pub trait Transport {
     fn write_direct(&mut self, char_uuid: &str, bytes: &[u8]) -> Result<(), TransportError>;
     /// Subscribe to notifications on a characteristic (event-driven; no polling).
     fn subscribe(&mut self, char_uuid: &str) -> Result<(), TransportError>;
+    /// Session-scoped opt-in for `write-experimental` opcodes (never persisted;
+    /// resets when the transport is recreated). Without it, the central policy
+    /// denies experimental writes.
+    fn set_experimental_opt_in(&mut self, on: bool);
 }

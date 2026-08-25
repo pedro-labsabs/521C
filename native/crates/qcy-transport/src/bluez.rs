@@ -98,10 +98,6 @@ impl BlueZTransport {
         self
     }
 
-    pub fn set_experimental_opt_in(&mut self, on: bool) {
-        self.experimental_opt_in = on;
-    }
-
     fn prop_str<'a>(obj: &'a BlueZObject, iface: &str, key: &str) -> Option<&'a str> {
         match obj.interfaces.get(iface)?.get(key)? {
             PropValue::Str(s) => Some(s.as_str()),
@@ -232,6 +228,10 @@ impl Transport for BlueZTransport {
     fn subscribe(&mut self, char_uuid: &str) -> Result<(), TransportError> {
         let path = self.char_path(char_uuid)?;
         self.bus.start_notify(&path)
+    }
+
+    fn set_experimental_opt_in(&mut self, on: bool) {
+        self.experimental_opt_in = on;
     }
 }
 

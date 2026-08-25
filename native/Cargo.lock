@@ -467,6 +467,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "qcy-app"
+version = "0.1.0"
+dependencies = [
+ "qcy-device",
+ "qcy-host",
+ "qcy-protocol",
+ "qcy-transport",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qcy-device"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qcy-host"
 version = "0.1.0"
 dependencies = [
