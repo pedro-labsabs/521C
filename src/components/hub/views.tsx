@@ -35,6 +35,7 @@ export function OverviewView() {
   const setNoise = useHub((s) => s.setNoise);
   const setGameMode = useHub((s) => s.setGameMode);
   const media = useHub((s) => s.media);
+  const transportKind = useHub((s) => s.transportKind);
   const mode = currentNoiseUi(device);
 
   return (
@@ -80,13 +81,33 @@ export function OverviewView() {
             <Toggle checked={device.gameMode} onChange={(v) => void setGameMode(v)} label="Game mode" />
           </div>
         </Panel>
-        <Panel title="Media · MPRIS">
-          <div className="text-sm font-medium">{device.media.title}</div>
-          <div className="text-xs text-fg-muted">
-            {device.media.artist} · {device.media.player}
-          </div>
+        <Panel title="Media · MPRIS (host)">
+          {transportKind === "mock" ? (
+            <>
+              <div className="text-sm font-medium">{device.media.title}</div>
+              <div className="text-xs text-fg-muted">
+                {device.media.artist} · {device.media.player}
+              </div>
+              <div className="mt-1 text-[11px] text-fg-subtle">
+                Sample data. MPRIS is a Linux host feature — the native runtime controls
+                real players (521cctl media …).
+              </div>
+            </>
+          ) : (
+            <div className="text-xs text-fg-muted">
+              MPRIS media state is a Linux host feature of the native runtime (521cctl
+              media …). The browser path cannot reach your media player, so no state is
+              shown here.
+            </div>
+          )}
           <div className="mt-3 flex gap-2">
-            <Button size="icon" className="size-9" onClick={() => void media("prev")} aria-label="Previous">
+            <Button
+              size="icon"
+              className="size-9"
+              onClick={() => void media("prev")}
+              aria-label="Previous (host feature, native runtime only)"
+              title="MPRIS control runs in the native runtime (521cctl media prev)"
+            >
               <SkipBack className="size-4" />
             </Button>
             <Button
@@ -94,11 +115,18 @@ export function OverviewView() {
               className="size-9"
               variant="primary"
               onClick={() => void media(device.media.playing ? "pause" : "play")}
-              aria-label={device.media.playing ? "Pause" : "Play"}
+              aria-label={device.media.playing ? "Pause (host feature, native runtime only)" : "Play (host feature, native runtime only)"}
+              title="MPRIS control runs in the native runtime (521cctl media play|pause)"
             >
               {device.media.playing ? <Pause className="size-4" /> : <Play className="size-4" />}
             </Button>
-            <Button size="icon" className="size-9" onClick={() => void media("next")} aria-label="Next">
+            <Button
+              size="icon"
+              className="size-9"
+              onClick={() => void media("next")}
+              aria-label="Next (host feature, native runtime only)"
+              title="MPRIS control runs in the native runtime (521cctl media next)"
+            >
               <SkipForward className="size-4" />
             </Button>
           </div>

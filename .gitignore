@@ -9,3 +9,12 @@ native/target/
 .env
 .env.*
 !.env.example
+.tools/
+
+# Project-local agent tooling/caches (not part of the product; see bootstrap/agent-tooling)
+.cache/
+.serena/
+.token-efficiency/
+scripts/agent/
+.prime/agent/skills/
+.prime/agent/settings.json

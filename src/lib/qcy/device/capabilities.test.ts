@@ -103,27 +103,24 @@ describe("honest summaries", () => {
   });
 });
 
-describe("host features are downgraded until implemented (issue #13)", () => {
-  it("systemEq is not a writable QCY capability", () => {
-    const c = HT08_CAPABILITIES.systemEq;
-    expect(c.implementation).toBe("not-implemented");
+describe("host features are host state, never device protocol (issue #13)", () => {
+  // Implemented in the native host layer (native/crates/qcy-host). The invariants that
+  // must never change: they are read-only with respect to the device, never claim device
+  // hardware/protocol support, and never become an interactive device write.
+  const hostKeys = ["systemEq", "autoGameMode", "codecStatus"] as const;
+
+  it.each(hostKeys.map((k) => [k]))("%s is implemented but never a device write", (k) => {
+    const c = HT08_CAPABILITIES[k];
+    expect(c.implementation).toBe("implemented");
     expect(c.write).toBe("read-only");
     expect(isWritable(c)).toBe(false);
     expect(canInteract(c)).toBe(false);
   });
 
-  it("autoGameMode is not implemented and writes nothing", () => {
-    const c = HT08_CAPABILITIES.autoGameMode;
-    expect(c.implementation).toBe("not-implemented");
-    expect(c.write).toBe("read-only");
-    expect(canInteract(c)).toBe(false);
-  });
-
-  it("codecStatus is mock-only, never presented as implemented", () => {
-    const c = HT08_CAPABILITIES.codecStatus;
-    expect(c.implementation).toBe("mock-only");
-    expect(isImplemented(c)).toBe(false);
-    expect(canInteract(c)).toBe(false);
+  it.each(hostKeys.map((k) => [k]))("%s never claims device hardware/protocol support", (k) => {
+    const c = HT08_CAPABILITIES[k];
+    expect(c.hardware).toBe("unknown");
+    expect(c.protocol).toBe("unknown");
   });
 });
 

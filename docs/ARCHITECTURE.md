@@ -40,6 +40,27 @@ destructive opcodes (`0x01`/`0x02`/`0x03`) are never sent, unknown models stay r
 and experimental opcodes need a session opt-in. The live D-Bus boundary is compiled behind
 the `bluez` Cargo feature (default on); the trait, mapping, policy and mock always build.
 
+## Host services (`native/crates/qcy-host`)
+
+The host-services layer is the host-side counterpart to the transport. It owns
+functionality that lives on the Linux machine, NOT in the earbuds, and is a separate
+interface from `Transport` and the protocol codecs:
+
+| Service | What it does | Deliberately does NOT do |
+| --- | --- | --- |
+| MPRIS | media discovery/state/control over `org.mpris.MediaPlayer2` (session bus, zbus) | fabricate metadata; touch the buds |
+| Codec | reads codec/sample-rate/profile passively from BlueZ `MediaTransport1` (system bus); unknown when unavailable | invent a value; acquire/modify any transport |
+| Auto Game Mode | MPRIS player-presence signal (`NameOwnerChanged`) + debounce + keyword allowlist | busy-poll; write while idle; write outside the central policy |
+| System EQ | one user-scoped PipeWire config artifact, create/remove lifecycle, disk-backed status | edit system-wide PipeWire config |
+
+Host-only state is never written to the device and is never presented as earbud
+DSP/protocol support; in the capability/truth model these stay `hardware: unknown`,
+`protocol: unknown`, `write: read-only`. Every external boundary (D-Bus, filesystem,
+audio graph) is isolated behind a trait and unit-tested against fakes. Missing services
+(no session bus, no MPRIS player, no PipeWire) are handled gracefully as a normal state.
+The live D-Bus integration is behind the `dbus` Cargo feature (default on); the traits,
+rule engine, debouncer and lifecycle logic always build and test.
+
 ## Command scheduling
 
 Device writes pass through a per-connection command scheduler
