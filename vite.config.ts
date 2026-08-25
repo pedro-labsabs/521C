@@ -5,7 +5,9 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   server: {
-    host: "0.0.0.0",
+    // Local-first (issue #12): loopback by default. Use `npm run dev:lan` to expose
+    // the dev server on the LAN explicitly.
+    host: "127.0.0.1",
     port: 8080,
     strictPort: true,
   },

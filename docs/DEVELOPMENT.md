@@ -16,6 +16,10 @@ npm ci
 npm run dev
 ```
 
+The dev server binds to loopback (`127.0.0.1`) by default — 521C is local-first
+and does not expose the dev server to the LAN. If you explicitly need to reach it
+from another machine on your network, use the opt-in command `npm run dev:lan`.
+
 Use `npm install` only when intentionally changing the dependency graph; it
 updates `package-lock.json`, which must be committed together with the
 `package.json` change. The committed lockfile is the source of truth for CI
@@ -82,11 +86,16 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
+npm run audit:network
 cd native
 cargo test --workspace
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+`npm run audit:network` fails if the built application or the default shell
+contains implicit third-party runtime URLs (issue #12); see
+`docs/SECURITY_MODEL.md` for the network-behavior contract.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs this same ladder on Node 22 and stable Rust for every push to `main` and every pull request.
 

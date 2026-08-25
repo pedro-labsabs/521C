@@ -18,6 +18,30 @@
 - Avoid root and privileged daemon replacement.
 - Do not add telemetry as a hidden dependency or default behavior.
 
+## Network behavior (local-first)
+
+521C is local-first. The default runtime makes **no implicit third-party network
+requests** (issue #12):
+
+- No web fonts, CDN stylesheets, analytics, or remote assets are fetched at
+  runtime. The UI uses a system font stack; any bundled asset ships in the
+  repository with compatible licensing.
+- The only network traffic the app initiates is the user's explicit Bluetooth
+  connection to their own device (Web Bluetooth in the browser, BlueZ/D-Bus on
+  the native path).
+- The dev server binds to loopback (`127.0.0.1`) by default. LAN exposure is
+  opt-in via `npm run dev:lan`. Preview/release paths stay local unless a user
+  deliberately exposes them.
+- User-initiated navigation to documentation or source links is allowed by this
+  contract; implicit runtime traffic is not.
+
+This behavior is enforced by two automated guards: a source-level test
+(`src/lib/privacy/network-audit.test.ts`, run by `npm test`) and a build audit
+(`npm run audit:network`, run in CI after the build) that scans the compiled
+output. Intentional exceptions are listed and justified in
+`scripts/audit-network.mjs`; adding a new third-party runtime URL requires a
+documented allowlist entry and a review of this section.
+
 ## Central write authorization
 
 Every outbound BLE write passes through one policy layer, `src/lib/qcy/policy.ts`,
