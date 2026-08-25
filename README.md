@@ -61,24 +61,36 @@ capabilities and never generate earbud writes.
 ├── PRIME_AGENT_START.md          # autonomous delivery bootstrap
 ├── AGENTS.md                     # operating contract for coding agents
 ├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── SECURITY.md
+├── conformance/              # shared byte-level protocol/config vectors (TS + Rust)
 ├── docs/
 │   ├── PRODUCT_SPEC.md
 │   ├── AUTONOMOUS_EXECUTION.md
 │   ├── HOST_SAFETY.md
-│   ├── ARCHITECTURE.md
-│   ├── DEVELOPMENT.md
-│   ├── PROTOCOL.md
 │   ├── SECURITY_MODEL.md
+│   ├── PROTOCOL.md
+│   ├── ARCHITECTURE.md
+│   ├── DESKTOP_ARCHITECTURE.md
+│   ├── DEVELOPMENT.md
 │   ├── SUPPORTED_DEVICES.md
+│   ├── GOVERNANCE.md
+│   ├── TRIAGE.md
 │   └── devices/HT08.md
 ├── native/
 │   └── crates/
 │       ├── qcy-protocol/     # Rust framing / advertisement parser
-│       └── 521cctl/          # native CLI
-├── scripts/                  # focused repository tests
+│       ├── qcy-device/       # HT08 profile + capability truth (Rust mirror)
+│       ├── qcy-transport/    # transport boundary: mock + BlueZ, central WritePolicy
+│       ├── qcy-host/         # host services: MPRIS, codec, system EQ, auto game mode
+│       ├── qcy-app/          # application core: typed commands/events, config schema
+│       ├── 521cctl/          # native CLI (binary `521cctl`)
+│       └── 521c-desktop/     # Slint desktop app (binary `521c`)
+├── packaging/linux/          # .desktop entry + AppStream metadata
+├── scripts/                  # network/docs audits, AppImage packaging
 └── src/
     ├── components/           # React development/reference UI
-    ├── lib/qcy/              # protocol, device profiles, transport, state
+    ├── lib/qcy/              # protocol, evidence ledger, policy, profiles, transport, state
     └── routes/               # TanStack Start routes
 ```
 
@@ -114,6 +126,8 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
+npm run audit:network
+npm run docs:check
 ```
 
 `package-lock.json` is committed; use `npm ci` for clean, reproducible setup and reserve `npm install` for intentional dependency changes.
