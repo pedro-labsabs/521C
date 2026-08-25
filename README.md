@@ -28,7 +28,7 @@ The autonomous plan gives the implementation agent broad authority to make ordin
 - Device EQ
 - Touch mapping
 - Wear detection and sleep mode
-- Find-earbuds chime with safety guardrails
+- Find-earbuds chime gated by an interactive preflight: blocked by default while a target bud is worn, stronger confirmation when wear state is unknown, a short cooldown, and no unattended/automation path
 - Host-side smart profiles and diagnostics
 - Mock transport for development without hardware
 
@@ -151,7 +151,7 @@ Do **not** invent UUIDs, vendor IDs, opcodes, checksums, firmware formats, or ca
 - Unknown/generic QCY devices are read-only by default in the target architecture.
 - Destructive opcodes `0x01`, `0x02`, and `0x03` are never sent by unattended automation.
 - Firmware OTA is not supported until format, integrity checks, failure behavior, and recovery are proven.
-- Find Earbuds/chime must remain interactive and preflight-gated before real use.
+- Find Earbuds/chime is interactive and preflight-gated: no locator tone is transmitted before confirmation completes, known-worn targets are blocked by default, unknown wear state requires a stronger explicit confirmation, a cooldown rate-limits repeats, and the CLI/automation path refuses it.
 - No telemetry or implicit cloud dependency.
 - Autonomous development must respect [`docs/HOST_SAFETY.md`](docs/HOST_SAFETY.md).
 

@@ -412,9 +412,118 @@ export function ProfilesView() {
   );
 }
 
+function FindEarbudsPanel() {
+  const device = useHub((s) => s.device);
+  const pre = useHub((s) => s.pendingChime);
+  const requestChime = useHub((s) => s.requestChime);
+  const cancelChime = useHub((s) => s.cancelChime);
+  const confirmChime = useHub((s) => s.confirmChime);
+  const [strongAck, setStrongAck] = useState(false);
+
+  const start = (side: "left" | "right" | "both") => {
+    setStrongAck(false);
+    requestChime(side);
+  };
+
+  const canPlay =
+    !!pre && pre.status !== "blocked-worn" && (pre.status !== "confirm-strong" || strongAck);
+
+  const sideLabel = pre
+    ? pre.side === "both"
+      ? "both buds"
+      : pre.side === "left"
+        ? "the left bud"
+        : "the right bud"
+    : "";
+
+  return (
+    <Panel
+      title="Find earbuds"
+      description="Chime uses 0x05 / 0x3D. Proximity is smoothed host RSSI — HT08 has no GPS."
+    >
+      <div className="mb-4">
+        <div className="text-xs text-fg-muted">Proximity</div>
+        <div className="mt-1 text-lg font-semibold">{rssiLabel(device.rssi)}</div>
+        <div className="tabular text-xs text-fg-subtle">{device.rssi} dBm</div>
+      </div>
+
+      {!pre && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={!device.connected} onClick={() => start("left")}>
+              Chime left
+            </Button>
+            <Button disabled={!device.connected} onClick={() => start("right")}>
+              Chime right
+            </Button>
+            <Button variant="primary" disabled={!device.connected} onClick={() => start("both")}>
+              Chime both
+            </Button>
+          </div>
+          <p className="mt-3 text-xs text-fg-muted">
+            Chiming asks for confirmation first and is blocked while a target bud is worn.
+          </p>
+        </>
+      )}
+
+      {pre && (
+        <div className="rounded-lg border border-border bg-bg px-3 py-3">
+          <div className="text-sm font-medium">Chime {sideLabel}</div>
+          <p className={cn("mt-1 text-xs", pre.status === "blocked-worn" ? "text-danger" : "text-warn")}>
+            {pre.reason}
+          </p>
+          <p className="mt-1 text-xs text-fg-muted">
+            Hearing safety: do not play the locator tone at high volume while a bud is in your ear.
+          </p>
+
+          {pre.status === "confirm-strong" && (
+            <label className="mt-3 flex items-start gap-2 text-xs text-fg">
+              <input
+                type="checkbox"
+                checked={strongAck}
+                onChange={(e) => setStrongAck(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>I have checked and the target bud is not in my ear.</span>
+            </label>
+          )}
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {pre.status !== "blocked-worn" && (
+              <Button
+                variant="primary"
+                disabled={!canPlay}
+                onClick={() => {
+                  setStrongAck(false);
+                  void confirmChime();
+                }}
+              >
+                Play chime
+              </Button>
+            )}
+            <Button
+              onClick={() => {
+                setStrongAck(false);
+                cancelChime();
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {device.lastSeen && (
+        <p className="mt-3 text-xs text-fg-muted">
+          Last seen {new Date(device.lastSeen.at).toLocaleString()} on {device.lastSeen.host}
+        </p>
+      )}
+    </Panel>
+  );
+}
+
 export function DeviceView() {
   const device = useHub((s) => s.device);
-  const findChime = useHub((s) => s.findChime);
   const setSpatial = useHub((s) => s.setSpatial);
   const hideMac = useHub((s) => s.hideMac);
   const address = hideMac
@@ -437,26 +546,7 @@ export function DeviceView() {
           Firmware update: not yet safely supported. 521C will not send OTA payloads.
         </div>
       </Panel>
-      <Panel title="Find earbuds" description="Chime uses 0x05 / 0x3D. Proximity is smoothed host RSSI — HT08 has no GPS.">
-        <div className="mb-4">
-          <div className="text-xs text-fg-muted">Proximity</div>
-          <div className="mt-1 text-lg font-semibold">{rssiLabel(device.rssi)}</div>
-          <div className="tabular text-xs text-fg-subtle">{device.rssi} dBm</div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={() => void findChime("left")}>Chime left</Button>
-          <Button onClick={() => void findChime("right")}>Chime right</Button>
-          <Button variant="primary" onClick={() => void findChime("both")}>
-            Chime both
-          </Button>
-        </div>
-        <p className="mt-3 text-xs text-warn">Do not play the locator tone at high volume while the buds are in your ears.</p>
-        {device.lastSeen && (
-          <p className="mt-3 text-xs text-fg-muted">
-            Last seen {new Date(device.lastSeen.at).toLocaleString()} on {device.lastSeen.host}
-          </p>
-        )}
-      </Panel>
+      <FindEarbudsPanel />
       <Panel title="Spatial audio" description="Opcode 0x2D exists. HT08 firmware exposure is unverified.">
         <Row label="Spatial (experimental)">
           <Toggle checked={device.spatial} onChange={(v) => void setSpatial(v)} />
