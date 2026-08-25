@@ -14,10 +14,11 @@ lint:
 
 build:
     npm run build
-    cd native && cargo build --release -p 521cctl
+    cd native && cargo build --release -p five21cctl
 
 check:
     npm test
     npm run typecheck
     npm run lint
+    npm run build
     cd native && cargo test --workspace && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings

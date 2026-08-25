@@ -8,10 +8,18 @@
 
 ## Setup
 
+Node.js 22+ and npm are required. Install locked dependencies for a clean,
+reproducible checkout:
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
+
+Use `npm install` only when intentionally changing the dependency graph; it
+updates `package-lock.json`, which must be committed together with the
+`package.json` change. The committed lockfile is the source of truth for CI
+and clean validation environments.
 
 For the Rust workspace:
 
@@ -20,11 +28,15 @@ cd native
 cargo test --workspace
 ```
 
+The CLI crate is named `five21cctl` because Cargo package names cannot start
+with a digit; the built binary keeps the contracted name `521cctl`.
+
 ## Validation ladder
 
-Run the narrowest relevant test while iterating, then run the full gate before a pull request is considered ready:
+Run the narrowest relevant test while iterating, then run the full gate before a pull request is considered ready. From a clean checkout, install with `npm ci` first so the locked dependency graph is used:
 
 ```bash
+npm ci
 npm test
 npm run typecheck
 npm run lint
@@ -34,6 +46,8 @@ cargo test --workspace
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs this same ladder on Node 22 and stable Rust for every push to `main` and every pull request.
 
 Or, with `just` installed:
 
