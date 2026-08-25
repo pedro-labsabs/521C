@@ -1059,9 +1059,22 @@ impl ConfigStorage for XdgStorage {
     }
     fn write(&mut self, value: &str) {
         if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
         }
-        let _ = std::fs::write(&self.path, value);
+        // Atomic replace: write a temp file in the same directory, then
+        // rename over the target. A crash mid-write can therefore never
+        // truncate the existing config; the old file stays intact until
+        // the new one is fully on disk.
+        let tmp = self.path.with_extension("json.tmp");
+        if std::fs::write(&tmp, value).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        if std::fs::rename(&tmp, &self.path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -1153,5 +1166,33 @@ mod tests {
             std::path::PathBuf::from("/tmp/521c-xdg-test/521c/config.json")
         );
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn xdg_storage_write_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "521c-cfg-atomic-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = dir.join("config.json");
+        let mut storage = XdgStorage::new(path.clone());
+
+        // First write creates the file with the exact content.
+        storage.write(r#"{"schema":1}"#);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"schema":1}"#);
+
+        // Overwrite replaces atomically; no stray temp file remains.
+        storage.write(r#"{"schema":1,"theme":"dark"}"#);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"schema":1,"theme":"dark"}"#
+        );
+        assert!(
+            !dir.join("config.json.tmp").exists(),
+            "temp file must not outlive a successful write"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

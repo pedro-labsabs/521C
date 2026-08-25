@@ -73,6 +73,19 @@ Direct (unframed) writes are additionally restricted to the profile's allowliste
 characteristics. Denials return a structured `{ code, message, opcode? }` result and
 surface as a `WriteDeniedError` at the transport, which the store reports as a toast.
 
+The native transport enforces the same contract in Rust
+(`native/crates/qcy-transport/src/policy.rs`): every framed write is fully decoded
+and **every** command block is authorized before any byte reaches BlueZ, so a
+supported first block can never smuggle a destructive or unauthorized block past
+the policy; undecodable frames are denied as malformed. The Rust policy is
+deliberately stricter than the browser policy in two fail-safe ways: (a) no
+`RequestData` (`0xFE`) exception for read-only devices — native status reads use
+plain GATT characteristic reads, so unknown devices receive no framed writes at
+all; and (b) no pure-disable exception for experimental opcodes — no native flow
+sends experimental writes without a session opt-in. If a future native flow needs
+either exception, align this document and both policy implementations in one
+change.
+
 The per-profile opcode/characteristic allowlists live with the device profile
 (`src/lib/qcy/device/catalog.ts`) and must follow the evidence model; issue #6 adds
 explicit provenance. Opcodes in the community catalog but not in the documented

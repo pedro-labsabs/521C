@@ -57,11 +57,11 @@ export const set = {
   envAdaptation: (state: EnableState) => encodeCommand(Cmd.EnvAdaptation, [enableByte(state)]),
   lightFlash: (on: boolean) => encodeCommand(Cmd.LightFlash, [on ? 0x01 : 0x00]),
   tonePlay: (toneId: number) => encodeCommand(Cmd.TonePlay, [toneId & 0xff]),
-  music: (action: number) => encodeCommand(Cmd.MusicControl, [action & 0xff]),
-  volume: (left: number, right: number) =>
-    encodeCommand(Cmd.Volume, [left & 0xff, right & 0xff, 0x00]),
+  // Catalog-only opcodes (MusicControl 0x04, NoiseValue 0x07, Volume 0x08,
+  // RenameDevice 0x18) deliberately have no builders here: without evidence
+  // they are not writable, and the central policy denies them anyway. Their
+  // byte layouts stay pinned by the conformance corpus via encodeCommand.
   soundBalance: (value: number) => encodeCommand(Cmd.SoundBalance, [value & 0xff]),
-  noiseValue: (value: number) => encodeCommand(Cmd.NoiseValue, [value & 0xff]),
   wear: (settings: WearSettings) => {
     const params = [
       settings.enabled ? 0x01 : 0x02,
@@ -84,10 +84,6 @@ export const set = {
       );
     }
     return encodeCommand(Cmd.EqParamsV2, params);
-  },
-  rename: (name: string) => {
-    const bytes = new TextEncoder().encode(name);
-    return encodeCommand(Cmd.RenameDevice, bytes);
   },
 };
 

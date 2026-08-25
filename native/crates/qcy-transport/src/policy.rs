@@ -116,35 +116,37 @@ impl WritePolicy {
         DESTRUCTIVE_OPCODES.contains(&op)
     }
 
-    /// Extract the opcode from a framed command (`SOF LEN CMD ...`). Returns None when
-    /// the frame is too short to carry an opcode.
-    fn frame_opcode(bytes: &[u8]) -> Option<u8> {
-        // Minimal framing check: SOF, length, then at least one command byte.
-        if bytes.len() < 3 || bytes[0] != qcy_protocol::SOF {
-            return None;
-        }
-        Some(bytes[2])
-    }
-
     /// Authorize a framed write to the command characteristic.
+    ///
+    /// The whole frame is decoded first and **every** command block is
+    /// authorized, mirroring the TypeScript policy (`src/lib/qcy/policy.ts`)
+    /// and `docs/SECURITY_MODEL.md` ("for every command block in a frame").
+    /// A supported first block can never smuggle a destructive, catalog-only
+    /// or experimental block past the policy, and an undecodable frame is
+    /// denied before it can reach the wire.
     pub fn authorize_frame(&self, bytes: &[u8], experimental_opt_in: bool) -> Result<(), Denial> {
         if self.read_only {
             return Err(Denial::ReadOnlyDevice);
         }
-        let op = Self::frame_opcode(bytes).ok_or(Denial::MalformedFrame)?;
-        if Self::is_destructive(op) {
-            return Err(Denial::DestructiveOpcode(op));
-        }
-        if self.supported_opcodes.contains(&op) {
-            return Ok(());
-        }
-        if self.experimental_opcodes.contains(&op) {
-            if experimental_opt_in {
-                return Ok(());
+        let packet =
+            qcy_protocol::packet::decode_packet(bytes).map_err(|_| Denial::MalformedFrame)?;
+        for block in &packet.blocks {
+            let op = block.cmd;
+            if Self::is_destructive(op) {
+                return Err(Denial::DestructiveOpcode(op));
             }
-            return Err(Denial::ExperimentalWithoutOptIn(op));
+            if self.supported_opcodes.contains(&op) {
+                continue;
+            }
+            if self.experimental_opcodes.contains(&op) {
+                if experimental_opt_in {
+                    continue;
+                }
+                return Err(Denial::ExperimentalWithoutOptIn(op));
+            }
+            return Err(Denial::OpcodeNotAuthorized(op));
         }
-        Err(Denial::OpcodeNotAuthorized(op))
+        Ok(())
     }
 
     /// Authorize an unframed direct write to an allowlisted characteristic.
@@ -173,7 +175,7 @@ impl WritePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qcy_protocol::packet::encode_command;
+    use qcy_protocol::packet::{encode_blocks, encode_command, CommandBlock};
 
     #[test]
     fn supported_opcode_is_authorized() {
@@ -203,6 +205,114 @@ mod tests {
                 Err(Denial::DestructiveOpcode(_))
             ));
         }
+    }
+
+    #[test]
+    fn multi_block_frame_with_only_supported_blocks_is_authorized() {
+        let p = WritePolicy::ht08();
+        let frame = encode_blocks(&[
+            CommandBlock {
+                cmd: 0x09,
+                params: vec![0x01],
+            },
+            CommandBlock {
+                cmd: 0x10,
+                params: vec![0x01],
+            },
+        ])
+        .unwrap();
+        assert!(p.authorize_frame(&frame, false).is_ok());
+    }
+
+    #[test]
+    fn destructive_opcode_hidden_in_a_multi_block_frame_is_denied() {
+        let p = WritePolicy::ht08();
+        for op in [0x01u8, 0x02, 0x03] {
+            let frame = encode_blocks(&[
+                CommandBlock {
+                    cmd: 0x09,
+                    params: vec![0x01],
+                },
+                CommandBlock {
+                    cmd: op,
+                    params: vec![],
+                },
+            ])
+            .unwrap();
+            assert!(
+                matches!(
+                    p.authorize_frame(&frame, true),
+                    Err(Denial::DestructiveOpcode(hidden)) if hidden == op
+                ),
+                "destructive 0x{op:02X} behind a supported block must be denied even with opt-in"
+            );
+        }
+    }
+
+    #[test]
+    fn experimental_opcode_hidden_in_a_multi_block_frame_needs_opt_in() {
+        let p = WritePolicy::ht08();
+        let frame = encode_blocks(&[
+            CommandBlock {
+                cmd: 0x09,
+                params: vec![0x01],
+            },
+            CommandBlock {
+                cmd: 0x23,
+                params: vec![0x01],
+            },
+        ])
+        .unwrap();
+        assert!(matches!(
+            p.authorize_frame(&frame, false),
+            Err(Denial::ExperimentalWithoutOptIn(0x23))
+        ));
+        assert!(p.authorize_frame(&frame, true).is_ok());
+    }
+
+    #[test]
+    fn catalog_only_opcode_hidden_in_a_multi_block_frame_is_denied() {
+        let p = WritePolicy::ht08();
+        let frame = encode_blocks(&[
+            CommandBlock {
+                cmd: 0x09,
+                params: vec![0x01],
+            },
+            CommandBlock {
+                cmd: 0x18,
+                params: vec![0x41],
+            },
+        ])
+        .unwrap();
+        assert!(matches!(
+            p.authorize_frame(&frame, false),
+            Err(Denial::OpcodeNotAuthorized(0x18))
+        ));
+    }
+
+    #[test]
+    fn malformed_frames_are_denied_before_any_block_is_considered() {
+        let p = WritePolicy::ht08();
+        // Bogus declared length (longer than the actual body).
+        assert!(matches!(
+            p.authorize_frame(&[0xFF, 0x40, 0x09], false),
+            Err(Denial::MalformedFrame)
+        ));
+        // Bad SOF.
+        assert!(matches!(
+            p.authorize_frame(&[0x00, 0x01, 0x09], false),
+            Err(Denial::MalformedFrame)
+        ));
+        // Truncated header.
+        assert!(matches!(
+            p.authorize_frame(&[0xFF], false),
+            Err(Denial::MalformedFrame)
+        ));
+        // Declared a block whose params are truncated.
+        assert!(matches!(
+            p.authorize_frame(&[0xFF, 0x03, 0x09, 0x02], false),
+            Err(Denial::MalformedFrame)
+        ));
     }
 
     #[test]

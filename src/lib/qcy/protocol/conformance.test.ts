@@ -14,7 +14,7 @@ import {
 } from "./advertisement";
 import { request, set } from "./commands";
 import { DEVICE_EQ_PRESETS } from "../eq-presets";
-import type { CommandBlock } from "./types";
+import { Cmd, type CommandBlock } from "./types";
 
 /**
  * Shared conformance vectors. The same JSON corpus drives the Rust
@@ -186,17 +186,27 @@ describe("round-trip of currently enabled write commands", () => {
     { name: "envAdaptation", bytes: set.envAdaptation("on"), cmd: 0x32 },
     { name: "lightFlash", bytes: set.lightFlash(true), cmd: 0x05 },
     { name: "tonePlay", bytes: set.tonePlay(1), cmd: 0x3d },
-    { name: "music", bytes: set.music(0x01), cmd: 0x04 },
-    { name: "volume", bytes: set.volume(10, 20), cmd: 0x08 },
+    // Catalog-only opcodes: encoded directly (no `set.*` builder exists for
+    // unevidenced writes); the round-trip still pins their documented layout.
+    { name: "music", bytes: encodeCommand(Cmd.MusicControl, [0x01]), cmd: 0x04 },
+    {
+      name: "volume",
+      bytes: encodeCommand(Cmd.Volume, [10, 20, 0x00]),
+      cmd: 0x08,
+    },
     { name: "soundBalance", bytes: set.soundBalance(50), cmd: 0x16 },
-    { name: "noiseValue", bytes: set.noiseValue(80), cmd: 0x07 },
+    { name: "noiseValue", bytes: encodeCommand(Cmd.NoiseValue, [80]), cmd: 0x07 },
     {
       name: "wear",
       bytes: set.wear({ enabled: true, musicIndex: 1, ancIndex: 0, toneEnable: true }),
       cmd: 0x2c,
     },
     { name: "eqV2", bytes: set.eqV2(DEVICE_EQ_PRESETS[0]!.preset), cmd: 0x22 },
-    { name: "rename", bytes: set.rename("521C"), cmd: 0x18 },
+    {
+      name: "rename",
+      bytes: encodeCommand(Cmd.RenameDevice, new TextEncoder().encode("521C")),
+      cmd: 0x18,
+    },
     { name: "request.battery", bytes: request.battery(), cmd: 0xfe },
     { name: "request.version", bytes: request.version(), cmd: 0xfe },
   ];
