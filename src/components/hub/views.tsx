@@ -46,6 +46,7 @@ export function OverviewView() {
         wornLeft={device.wornLeft}
         wornRight={device.wornRight}
         connected={device.connected}
+        known={device.telemetryKnown}
       />
       <div className="grid gap-4">
         <Panel title="Now">

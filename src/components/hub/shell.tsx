@@ -28,7 +28,13 @@ import {
 } from "@/components/hub/views";
 import { Button } from "@/components/ui/button";
 import { currentNoiseUi, useHub, type HubView } from "@/lib/qcy/hub-store";
+import { webBluetoothAvailable } from "@/lib/qcy/transport";
 import { cn } from "@/lib/utils";
+
+/** Battery percent label; "--" until real telemetry has been observed (issue #2). */
+function bpct(known: boolean, level: number): string {
+  return known ? `${level}%` : "--";
+}
 
 const NAV: { id: HubView; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -57,6 +63,8 @@ export function HubShell() {
   const setMinimized = useHub((s) => s.setMinimized);
   const setGameMode = useHub((s) => s.setGameMode);
   const setNoise = useHub((s) => s.setNoise);
+  const transportKind = useHub((s) => s.transportKind);
+  const connectWebBluetooth = useHub((s) => s.connectWebBluetooth);
 
   useEffect(() => {
     document.documentElement.classList.toggle("light", theme === "light");
@@ -91,7 +99,7 @@ export function HubShell() {
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">521C</div>
             <div className="truncate text-xs text-fg-muted">
-              L {device.battery.left.level}% · R {device.battery.right.level}% · {currentNoiseUi(device)}
+              L {bpct(device.telemetryKnown, device.battery.left.level)} · R {bpct(device.telemetryKnown, device.battery.right.level)} · {currentNoiseUi(device)}
             </div>
           </div>
         </button>
@@ -113,12 +121,20 @@ export function HubShell() {
             </div>
             <p className="truncate text-xs text-fg-muted">
               {device.profile.subtitle} · {device.connected ? "connected" : device.connecting ? "connecting" : "idle"}
+              <span
+                className={cn(
+                  "ml-2 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                  transportKind === "web-bluetooth" ? "bg-accent/15 text-accent" : "bg-bg-hover text-fg-subtle",
+                )}
+              >
+                {transportKind === "web-bluetooth" ? "Web Bluetooth" : "Mock preview"}
+              </span>
             </p>
           </div>
           <div className="hidden items-center gap-2 tabular text-xs text-fg-muted md:flex">
-            <span>L {device.battery.left.level}%</span>
-            <span>R {device.battery.right.level}%</span>
-            <span>Case {device.battery.case.level}%</span>
+            <span>L {bpct(device.telemetryKnown, device.battery.left.level)}</span>
+            <span>R {bpct(device.telemetryKnown, device.battery.right.level)}</span>
+            <span>Case {bpct(device.telemetryKnown, device.battery.case.level)}</span>
           </div>
           <Button size="sm" variant="quiet" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle theme">
             {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
@@ -175,6 +191,11 @@ export function HubShell() {
             <button type="button" className="hover:text-fg" onClick={() => void setGameMode(!device.gameMode)}>
               Game
             </button>
+            {webBluetoothAvailable() && (
+              <button type="button" className="hover:text-fg" onClick={() => void connectWebBluetooth()}>
+                Connect real device
+              </button>
+            )}
             {device.connected ? (
               <button type="button" className="hover:text-fg" onClick={() => void disconnect()}>
                 Disconnect
