@@ -144,35 +144,31 @@ After implementation:
 
 ## 9. Validation gates
 
-Web / TypeScript:
+Single entry point (mirrors CI, exits non-zero on any failure):
 
 ```bash
-npm test
+./scripts/check
+```
+
+It runs, in order: eslint → tsc typecheck → vitest → vite build → `cargo fmt --check` → `cargo test --workspace` → clippy (`-D warnings`). `just check` (see §14 for the repo-local `just`) runs the same ladder.
+
+Individual components, when iterating on one surface:
+
+```bash
+npm test              # or: npx vitest run src/lib/qcy/protocol
 npm run typecheck
 npm run lint
 npm run build
+cd native && cargo test --workspace
+cd native && cargo fmt --check
+cd native && cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-After issue #5, clean/reproducible setup should use the committed lockfile and `npm ci`.
-
-Rust:
-
-```bash
-cd native
-cargo test --workspace
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-With `just`:
-
-```bash
-just check
-```
+Clean/reproducible setup uses the committed lockfile: `npm ci`. Use `npm install` only when intentionally changing the dependency graph, and commit the lockfile with it.
 
 Release/native packaging adds its own build/launch checks as implemented by the desktop work.
 
-Do not claim a gate passed unless it was actually run successfully. If the environment prevents a gate, state that explicitly and continue all other independent verification.
+Do not claim a gate passed unless it was actually run successfully. If the environment prevents a gate, state that explicitly and continue all other independent verification. Never hide, skip, or weaken a failing check to get green — fix the root cause.
 
 ## 10. GitHub and pull-request expectations
 
@@ -223,3 +219,43 @@ If hardware is unavailable, build deterministic fake/mock boundaries and continu
 A task is done when the requested behavior is implemented, relevant tests pass, protocol/safety/host invariants remain true, docs are synchronized where necessary, and the repository contains no unrelated/generated noise.
 
 The **project** is done only when the release checklist in `docs/AUTONOMOUS_EXECUTION.md` is substantially evidenced. A complete-looking UI, a successful compile, or a mock-only flow is insufficient by itself.
+
+## 14. Local agent tooling (isolated)
+
+Repo-local portable tools live in `.tools/bin/` (git-ignored binaries, pinned and checksum-verified by `scripts/fetch-tools.sh`). Nothing is installed globally; `sudo`/`apt`/global npm/cargo installs are not allowed for agent tooling.
+
+```bash
+source scripts/env.sh   # current shell only: prepends .tools/bin to PATH
+./scripts/doctor        # environment diagnostic; fetches missing .tools safely
+./scripts/fetch-tools.sh  # (re)install pinned rtk + just into .tools/bin
+```
+
+`.tools/bin` contains:
+
+- `rtk` — Rust Token Killer (rtk-ai/rtk), output-compressing proxy. There is another, unrelated project named `rtk`; verify with `rtk gain`.
+- `just` — runs the `justfile` recipes without a system install.
+
+RTK usage policy (explicit proxy, no `rtk init` — it has no Prime Agent integration):
+
+- Prefer `rtk git ...`, `rtk cargo ...`, `rtk npm ...`, `rtk vitest ...`, `rtk tsc ...`, `rtk grep/rg ...`, `rtk diff ...`, `rtk read ...`, `rtk tree ...` when the compressed output preserves the needed information.
+- Never use RTK blindly. For diagnosing a failure, rerun the original command with full output.
+- Do not run `rtk init --global` (or any global init).
+
+## 15. Agent communication and context discipline
+
+- Investigate before asking. If code, tests, docs, or git history give enough evidence, decide and proceed; do not ask for confirmation on reversible, low-risk technical choices.
+- Be concise. Do not narrate trivial commands or restate what gate output already proves.
+- When finishing a task, report:
+
+  ```text
+  Status: PASS | FAIL | BLOCKED
+  Alterações: <short summary>
+  Validação: <checks actually run>
+  Riscos: <only if they exist>
+  ```
+
+- No long retrospectives unless requested.
+- Prefer targeted searches (`rtk grep`, `rtk rg`) over dumping whole files into context; read only the slices you need.
+- Do not compress or truncate output when that would hide information needed for diagnosis.
+- Do not recompile or re-run unchanged checks without reason; prefer the narrowest relevant test while iterating, full `./scripts/check` before declaring done.
+- Do not mask problems with `any`, `eslint-disable`, `noqa`, `#[allow]`, unsafe casts, or skipped tests. Fix the root cause.

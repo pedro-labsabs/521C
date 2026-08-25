@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# 521C single quality gate. Mirrors CI (.github/workflows/ci.yml) plus the
+# Rust format check order used by `just check`. Exits non-zero on any failure.
+#
+#   ./scripts/check
+#
+# Assumes dependencies are already installed (see scripts/doctor).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+step "web: lint (eslint)"
+npm run --silent lint
+
+step "web: typecheck (tsc --noEmit)"
+npm run --silent typecheck
+
+step "web: tests (vitest)"
+npm test --silent
+
+step "web: build (vite)"
+npm run --silent build
+
+step "native: format check (cargo fmt --check)"
+(cd native && cargo fmt --check)
+
+step "native: tests (cargo test --workspace)"
+(cd native && cargo test --workspace)
+
+step "native: clippy (-D warnings)"
+(cd native && cargo clippy --all-targets --all-features -- -D warnings)
+
+printf '\ncheck: PASS\n'

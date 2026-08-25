@@ -1,0 +1,11 @@
+{
+  "defaultThinkingLevel": "high",
+  "hideThinkingBlock": true,
+  "compaction": {
+    "enabled": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3
+  }
+}

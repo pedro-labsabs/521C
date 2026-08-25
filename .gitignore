@@ -9,3 +9,4 @@ native/target/
 .env
 .env.*
 !.env.example
+.tools/

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# 521C environment doctor: verify the local development environment.
+# Never installs anything globally; missing repo-local tools are fetched
+# into .tools/bin with checksum verification.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+fails=0
+
+ok()   { printf 'ok   %s\n' "$*"; }
+bad()  { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
+info() { printf '     %s\n' "$*"; }
+
+need_cmd() { # $1=cmd $2=hint
+  if command -v "$1" >/dev/null 2>&1; then
+    ok "$1 ($("$1" --version 2>&1 | head -1))"
+  else
+    bad "$1 missing — $2"
+  fi
+}
+
+echo "== required tools =="
+need_cmd git "system package"
+need_cmd node "Node.js 22+ (https://nodejs.org or nvm, user-local install)"
+need_cmd npm "ships with node"
+need_cmd cargo "rustup (user-local, https://rustup.rs)"
+need_cmd rustc "rustup"
+if command -v rustup >/dev/null 2>&1; then
+  rustup component list --installed 2>/dev/null | grep -q '^rustfmt' \
+    && ok "rustfmt component" || bad "rustfmt missing — rustup component add rustfmt"
+  rustup component list --installed 2>/dev/null | grep -q '^clippy' \
+    && ok "clippy component" || bad "clippy missing — rustup component add clippy"
+fi
+need_cmd curl "system package"
+need_cmd sha256sum "coreutils"
+
+echo "== repository files =="
+for f in package.json package-lock.json native/Cargo.toml native/Cargo.lock \
+         conformance/protocol_vectors.json AGENTS.md .prime/agent/APPEND_SYSTEM.md; do
+  [ -f "$f" ] && ok "$f" || bad "$f missing"
+done
+
+echo "== dependencies =="
+if [ -d node_modules ] && [ -d node_modules/vitest ]; then
+  ok "node_modules present"
+else
+  info "node_modules missing — running npm ci (repo-local)"
+  if npm ci --no-audit --no-fund; then ok "npm ci"; else bad "npm ci failed"; fi
+fi
+
+echo "== portable tools (.tools/bin) =="
+if [ -x .tools/bin/rtk ] && [ -x .tools/bin/just ]; then
+  ok "rtk $(.tools/bin/rtk --version 2>&1 | head -1)"
+  ok "just $(.tools/bin/just --version 2>&1 | head -1)"
+else
+  info "fetching pinned tools via scripts/fetch-tools.sh"
+  if bash scripts/fetch-tools.sh; then ok "fetch-tools"; else bad "fetch-tools failed"; fi
+fi
+if .tools/bin/rtk gain >/dev/null 2>&1; then
+  ok "rtk gain works (correct RTK: Rust Token Killer)"
+else
+  bad "rtk gain failed — wrong rtk binary or broken install; rerun scripts/fetch-tools.sh"
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "doctor: PASS"
+else
+  echo "doctor: $fails problem(s) found"
+  exit 1
+fi

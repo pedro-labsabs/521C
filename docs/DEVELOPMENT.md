@@ -90,11 +90,30 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 GitHub Actions (`.github/workflows/ci.yml`) runs this same ladder on Node 22 and stable Rust for every push to `main` and every pull request.
 
-Or, with `just` installed:
+Or use the single quality gate entry point (no extra install needed):
 
 ```bash
-just check
+./scripts/check
 ```
+
+`just` is also available repo-locally after `./scripts/doctor` or
+`source scripts/env.sh` (see "Local tooling" below), so `just check` works
+without a system install.
+
+## Local tooling
+
+Portable development tools live in `.tools/bin/` (git-ignored). They are
+pinned, checksum-verified, and never installed globally:
+
+```bash
+./scripts/doctor          # diagnose environment; fetches missing tools locally
+source scripts/env.sh     # add .tools/bin to PATH for the current shell only
+./scripts/fetch-tools.sh  # (re)fetch pinned rtk + just
+```
+
+`rtk` (Rust Token Killer, rtk-ai/rtk) is used as an explicit output-compressing
+proxy for agent work (`rtk git ...`, `rtk cargo ...`, `rtk vitest ...`); run the
+original command when full output is needed for diagnosis.
 
 ## Testing
 
