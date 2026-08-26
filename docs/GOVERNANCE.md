@@ -72,6 +72,40 @@ Merge rules:
 - Pre-1.0 there is no stability guarantee; breaking changes are noted in the
   changelog, not gated.
 
+### Release gate enforcement (issue #41)
+
+The intended gate is: `Web · Node 22`, `Native · Rust stable` and
+`Desktop · AppImage artifact` required on `main` before merge/tag.
+
+Current plan limitation (audited 2026-08-26): the repository is **private**
+in a **Free-plan** organization, so
+
+- GitHub-hosted runners require available Actions minutes / a spending limit;
+  when the monthly quota is exhausted jobs fail before any step runs
+  (annotation: "recent account payments have failed or your spending limit
+  needs to be increased");
+- branch protection with required status checks is not available for private
+  repositories on the Free plan (API returns HTTP 403 "Upgrade to GitHub Pro
+  or make this repository public").
+
+Until the plan limitation is resolved, the enforced workaround is:
+
+1. every PR runs the full local validation ladder from a clean checkout and
+   posts the exact commands and results in the PR (see §3);
+2. every release carries a **release gate audit record** in its notes that
+   lists each gate as PASSED (with evidence) or NOT STARTED/SKIPPED (with the
+   external reason) — a skipped or not-started CI job is never presented as a
+   passed gate;
+3. the final release tag for a milestone waits on a green remote CI run
+   whenever remote runners are available; while they are not, the tag is
+   deferred and the blocker is named in the release notes.
+
+Owner action required to restore the full gate (any one): make the
+repository public (unlimited free minutes + branch protection), or upgrade
+the org plan / add a payment method and spending limit, or register an
+authorized self-hosted runner. Owner: the `pedro-labsabs` organization
+owner.
+
 ## 5. Issue triage
 
 Triage labels, milestones and conventions are defined in `docs/TRIAGE.md`.
