@@ -60,7 +60,18 @@ function makeChar(uuid: string, value: Uint8Array = new Uint8Array()): FakeChar 
   return char;
 }
 
-function makeHarness() {
+type FakeDeviceCtl = {
+  device: unknown;
+  chars: Map<string, FakeChar>;
+  server: { connected: boolean };
+  /** Mutable failure switches a test can flip mid-session. */
+  flags: { failConnect: boolean; noService: boolean };
+  /** Fire a device-level event, e.g. "gattserverdisconnected". */
+  fire: (type: string) => void;
+};
+
+function makeFakeDevice(opts: { id?: string; name?: string } = {}): FakeDeviceCtl {
+  const flags = { failConnect: false, noService: false };
   const battery = encodeBatteryBytes({
     left: { level: 55, charging: false },
     right: { level: 56, charging: false },
@@ -84,6 +95,7 @@ function makeHarness() {
   const server = {
     connected: false,
     async connect() {
+      if (flags.failConnect) throw new Error("gatt connect failed");
       server.connected = true;
       return server;
     },
@@ -91,23 +103,40 @@ function makeHarness() {
       server.connected = false;
     },
     async getPrimaryService(_uuid: string) {
+      if (flags.noService) throw new Error("no such service");
       return service;
     },
   };
+  const listeners = new Map<string, Array<() => void>>();
   const device = {
-    id: "fake-ht08",
-    name: "QCY MeloBuds Pro",
+    id: opts.id ?? "fake-ht08",
+    name: opts.name ?? "QCY MeloBuds Pro",
     gatt: server,
-    addEventListener(_type: string, _listener: () => void) {
-      /* no-op */
+    addEventListener(type: string, listener: () => void) {
+      const arr = listeners.get(type) ?? [];
+      arr.push(listener);
+      listeners.set(type, arr);
     },
   };
+  return {
+    device,
+    chars,
+    server,
+    flags,
+    fire: (type: string) => {
+      for (const l of listeners.get(type) ?? []) l();
+    },
+  };
+}
+
+function makeHarness() {
+  const ctl = makeFakeDevice();
   const provider = {
     async requestDevice(_options: unknown) {
-      return device;
+      return ctl.device;
     },
   } as unknown as WebBluetoothProvider;
-  return { transport: new WebBluetoothTransport(provider), chars, server };
+  return { transport: new WebBluetoothTransport(provider), chars: ctl.chars, server: ctl.server, ctl };
 }
 
 function makeEvents() {
@@ -230,6 +259,69 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     expect(chars.get(CHAR.commandWrite)!.writes.length).toBe(0);
   });
 
+  it("failed reconnect invalidates the previous session", async () => {
+    const { transport, ctl } = makeHarness();
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("fake-ht08", events);
+    ctl.flags.failConnect = true;
+    await expect(transport.connect("fake-ht08", events)).rejects.toThrow();
+    // Stale handles must not be usable after the failed reconnect.
+    await expect(transport.write(set.lowLatency("on"))).rejects.toThrow("Not connected");
+    await expect(transport.read(CHAR.battery)).rejects.toThrow("Not connected");
+    expect(ctl.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+  });
+
+  it("missing vendor service leaves no session behind", async () => {
+    const { transport, ctl } = makeHarness();
+    const events = makeEvents();
+    await transport.scan();
+    ctl.flags.noService = true;
+    await expect(transport.connect("fake-ht08", events)).rejects.toThrow();
+    await expect(transport.write(set.lowLatency("on"))).rejects.toThrow("Not connected");
+    expect(ctl.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+  });
+
+  it("remote disconnect invalidates cached characteristics", async () => {
+    const { transport, ctl } = makeHarness();
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("fake-ht08", events);
+    ctl.fire("gattserverdisconnected");
+    const last = events.states[events.states.length - 1]!;
+    expect(last.connected).toBe(false);
+    expect(events.disconnects.length).toBeGreaterThan(0);
+    // No write may reach the stale characteristics of the dead session.
+    await expect(transport.write(set.lowLatency("on"))).rejects.toThrow("Not connected");
+    await expect(
+      transport.writeDirect(CHAR.keyFunctionV2, Uint8Array.from([1, 2, 3, 4])),
+    ).rejects.toThrow("Not connected");
+    expect(ctl.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+    expect(ctl.chars.get(CHAR.keyFunctionV2)!.writes).toHaveLength(0);
+  });
+
+  it("replacing the device never reuses the previous session's handles", async () => {
+    const ctlA = makeFakeDevice({ id: "dev-a" });
+    const ctlB = makeFakeDevice({ id: "dev-b" });
+    let current = ctlA;
+    const provider = {
+      async requestDevice(_options: unknown) {
+        return current.device;
+      },
+    } as unknown as WebBluetoothProvider;
+    const transport = new WebBluetoothTransport(provider);
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("dev-a", events);
+    current = ctlB;
+    await transport.scan();
+    await transport.connect("dev-b", events);
+    await transport.write(set.lowLatency("on"));
+    // After A -> B replacement, only B's characteristic may receive bytes.
+    expect(ctlA.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+    expect(ctlB.chars.get(CHAR.commandWrite)!.writes).toHaveLength(1);
+  });
+
   it("disconnect is idempotent and clears cached characteristics", async () => {
     const { transport, server } = makeHarness();
     const events = makeEvents();
@@ -238,9 +330,9 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     await transport.disconnect();
     expect(server.connected).toBe(false);
     expect(events.disconnects.length).toBeGreaterThan(0);
-    // After disconnect a read resolves to empty rather than throwing.
-    const bytes = await transport.read(CHAR.battery);
-    expect(bytes.length).toBe(0);
+    // After disconnect the session is gone: reads report a disconnected error
+    // instead of silently resolving against a stale characteristic.
+    await expect(transport.read(CHAR.battery)).rejects.toThrow("Not connected");
     // Second disconnect does not throw.
     await expect(transport.disconnect()).resolves.toBeUndefined();
   });

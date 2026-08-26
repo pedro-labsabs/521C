@@ -118,7 +118,10 @@ Slint 1.x has no first-class system-tray / StatusNotifier API. Rather than add
 an unmaintained tray dependency, v1 ships a deliberate alternative:
 
 - 521C is a normal windowed desktop application with a small utility window;
-- configuration is persisted on clean window close;
+- configuration is persisted on clean window close, and the close handler then
+  ends the Slint event loop (`slint::quit_event_loop`), so closing the only
+  window exits the process — no invisible survivor process, no orphaned
+  BlueZ/MPRIS workers (issue #40);
 - there is **no background daemon** (consistent with the lightweight/no-daemon
   product principles); device state is re-read on launch and on demand.
 
@@ -173,3 +176,12 @@ Normal use never requires root.
 `521c --self-test` creates the window, starts the event pump, processes events
 briefly and exits 0. The packaging gate and CI use it to verify launch without
 interactive display time. Interactive behavior still requires a display.
+
+`521c --mock --close-self-test` additionally verifies the close lifecycle
+(issue #40): after the window opens, the app dispatches the same
+`WindowEvent::CloseRequested` a window manager's close button produces, and
+the run only passes when the close handler persists the configuration, ends
+the event loop, and the process exits 0 with the persisted config still
+valid. `scripts/test-desktop-close.sh` wraps this with a timeout so a hidden
+survivor process fails the gate; CI runs it against both the dev binary and
+the packaged AppImage under a virtual display.

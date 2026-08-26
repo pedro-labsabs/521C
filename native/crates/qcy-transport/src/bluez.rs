@@ -246,6 +246,18 @@ impl BlueZTransport {
             .ok_or_else(|| TransportError::NotFound(char_uuid.to_string()))
     }
 
+    /// Forget the current session: device path, model attestation and every
+    /// cached characteristic handle. The bus disconnect is best-effort — the
+    /// session identity must be invalidated even if the bus call fails.
+    fn invalidate_session(&mut self) {
+        let path = self.device_path.take();
+        self.chars.clear();
+        self.connected_model_known = false;
+        if let Some(path) = path {
+            let _ = self.bus.device_disconnect(&path);
+        }
+    }
+
     /// Connect one specific device object and resolve the vendor characteristics.
     /// Leaves the transport fully disconnected on any failure (no half state).
     fn try_connect_path(&mut self, path: &str) -> Result<(), TransportError> {
@@ -352,6 +364,10 @@ impl Transport for BlueZTransport {
     }
 
     fn connect(&mut self, address: &str) -> Result<(), TransportError> {
+        // Transactional replacement: a new connection attempt must never
+        // inherit characteristic handles from a previous device/session, and
+        // any failure below must leave the transport fully disconnected.
+        self.invalidate_session();
         let path = device_path(&self.adapter, address);
         let primary = self.try_connect_path(&path);
         if primary.is_ok() {
@@ -389,11 +405,17 @@ impl Transport for BlueZTransport {
     }
 
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
+        if self.device_path.is_none() {
+            return Err(TransportError::Disconnected);
+        }
         let path = self.char_path(char_uuid)?;
         self.bus.read_value(&path)
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        if self.device_path.is_none() {
+            return Err(TransportError::Disconnected);
+        }
         if !self.connected_model_known {
             return Err(TransportError::Denied(
                 crate::policy::Denial::ReadOnlyDevice,
@@ -407,6 +429,9 @@ impl Transport for BlueZTransport {
     }
 
     fn write_direct(&mut self, char_uuid: &str, bytes: &[u8]) -> Result<(), TransportError> {
+        if self.device_path.is_none() {
+            return Err(TransportError::Disconnected);
+        }
         if !self.connected_model_known {
             return Err(TransportError::Denied(
                 crate::policy::Denial::ReadOnlyDevice,
@@ -420,6 +445,9 @@ impl Transport for BlueZTransport {
     }
 
     fn subscribe(&mut self, char_uuid: &str) -> Result<(), TransportError> {
+        if self.device_path.is_none() {
+            return Err(TransportError::Disconnected);
+        }
         let path = self.char_path(char_uuid)?;
         self.bus.start_notify(&path)
     }
@@ -636,6 +664,8 @@ mod tests {
         writes: WriteLog,
         notifies: Arc<Mutex<Vec<String>>>,
         fail_connect: bool,
+        /// Device object paths for which `Device1.Connect` fails.
+        fail_connect_paths: RefCell<Vec<String>>,
     }
 
     fn obj(path: &str, iface: &str, props: Vec<(&str, PropValue)>) -> BlueZObject {
@@ -700,8 +730,8 @@ mod tests {
         fn stop_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
             Ok(())
         }
-        fn device_connect(&self, _p: &str) -> Result<(), TransportError> {
-            if self.fail_connect {
+        fn device_connect(&self, p: &str) -> Result<(), TransportError> {
+            if self.fail_connect || self.fail_connect_paths.borrow().iter().any(|x| x == p) {
                 return Err(TransportError::DeviceOutOfRange);
             }
             *self.connected.borrow_mut() = true;
@@ -906,8 +936,10 @@ mod tests {
 
     #[test]
     fn connect_failure_surfaces_structured_error() {
+        let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
             objects: ht08_fixture(),
+            writes: writes.clone(),
             fail_connect: true,
             ..Default::default()
         };
@@ -918,6 +950,135 @@ mod tests {
             t.connect("F8:5C:7D:12:08:08"),
             Err(TransportError::DeviceOutOfRange)
         );
+        // Initial-connect failure leaves no session behind: I/O reports
+        // disconnected and nothing reaches the bus.
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert_eq!(t.write(&frame), Err(TransportError::Disconnected));
+        assert_eq!(
+            t.read("00000008-0000-1000-8000-00805f9b34fb"),
+            Err(TransportError::Disconnected)
+        );
+        assert!(writes.lock().expect("writes mutex").is_empty());
+    }
+
+    /// Two fully resolved known-model devices with different names, so the
+    /// dual-mode fallback can never confuse them with each other.
+    fn two_device_fixture() -> Vec<BlueZObject> {
+        let mut objects = ht08_fixture();
+        let dev_b = "/org/bluez/hci0/dev_11_22_33_44_55_66";
+        let svc_b = format!("{dev_b}/service0001");
+        objects.push(obj(
+            dev_b,
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("11:22:33:44:55:66".into())),
+                ("Alias", PropValue::Str("QCY HT08".into())),
+                ("RSSI", PropValue::I16(-40)),
+            ],
+        ));
+        objects.push(obj(
+            &svc_b,
+            SERVICE_IFACE,
+            vec![("UUID", PropValue::Str(SERVICE_MAIN.into()))],
+        ));
+        objects.push(obj(
+            &format!("{svc_b}/char0001"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        objects.push(obj(
+            &format!("{svc_b}/char0002"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str("00000008-0000-1000-8000-00805f9b34fb".into()),
+            )],
+        ));
+        objects
+    }
+
+    #[test]
+    fn connect_replaces_the_previous_device_session() {
+        let (mut t, writes) = transport(two_device_fixture());
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        t.write(&frame).unwrap();
+        // Replace device A with device B.
+        t.connect("11:22:33:44:55:66").unwrap();
+        t.write(&frame).unwrap();
+        let w = writes.lock().expect("writes mutex");
+        assert_eq!(w.len(), 2);
+        assert!(w[0].0.contains("dev_F8_5C_7D_12_08_08"));
+        // After replacement, writes must target B's characteristics only.
+        assert!(w[1].0.contains("dev_11_22_33_44_55_66"));
+        // Reads also go through B's resolved characteristics.
+        let bytes = t.read("00000008-0000-1000-8000-00805f9b34fb").unwrap();
+        assert_eq!(bytes, vec![0x52, 0x50, 0x5E]);
+    }
+
+    #[test]
+    fn failed_connect_invalidates_the_previous_session() {
+        // A is fully connected; B fails at the D-Bus connect level. Different
+        // names and no vendor UUIDs keep the dual-mode fallback from silently
+        // re-connecting A as B's "identity".
+        let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
+        let bus = FakeBus {
+            objects: two_device_fixture(),
+            writes: writes.clone(),
+            fail_connect_paths: RefCell::new(vec![device_path("hci0", "11:22:33:44:55:66")]),
+            ..Default::default()
+        };
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert_eq!(
+            t.connect("11:22:33:44:55:66"),
+            Err(TransportError::DeviceOutOfRange)
+        );
+        // Session fully invalidated: no I/O may reach A's stale char paths.
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert_eq!(t.write(&frame), Err(TransportError::Disconnected));
+        assert_eq!(
+            t.read("00000008-0000-1000-8000-00805f9b34fb"),
+            Err(TransportError::Disconnected)
+        );
+        assert_eq!(
+            t.subscribe(crate::policy::CHAR_COMMAND_WRITE),
+            Err(TransportError::Disconnected)
+        );
+        assert!(writes.lock().expect("writes mutex").is_empty());
+    }
+
+    #[test]
+    fn failed_service_resolution_invalidates_the_previous_session() {
+        // A is fully resolved; B is a known model whose D-Bus connect succeeds
+        // but whose GATT service resolution fails (no vendor service objects).
+        let mut objects = ht08_fixture();
+        objects.push(obj(
+            "/org/bluez/hci0/dev_11_22_33_44_55_66",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("11:22:33:44:55:66".into())),
+                ("Alias", PropValue::Str("QCY HT08".into())),
+            ],
+        ));
+        let (mut t, writes) = transport(objects);
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert!(t.connect("11:22:33:44:55:66").is_err());
+        // No half-bound state: B's path must never be usable, and A's cached
+        // characteristics must not survive the failed replacement.
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert_eq!(t.write(&frame), Err(TransportError::Disconnected));
+        assert_eq!(
+            t.read("00000008-0000-1000-8000-00805f9b34fb"),
+            Err(TransportError::Disconnected)
+        );
+        assert!(writes.lock().expect("writes mutex").is_empty());
     }
 
     /// Dual-mode fixture: the BR/EDR identity (audio pairing, no GATT children)

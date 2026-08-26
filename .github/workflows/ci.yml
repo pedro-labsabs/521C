@@ -64,6 +64,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Desktop launch self-test (mock transport, virtual display)
         run: xvfb-run -a cargo run -q -p five21c-desktop --bin 521c -- --mock --self-test
+      - name: Desktop close-lifecycle test (issue #40, virtual display)
+        run: xvfb-run -a ../scripts/test-desktop-close.sh cargo run -q -p five21c-desktop --bin 521c --
 
   desktop-package:
     name: Desktop · AppImage artifact
@@ -92,6 +94,10 @@ jobs:
         run: |
           APPIMAGE="$(ls native/dist/521C-*.AppImage)"
           xvfb-run -a "$APPIMAGE" --appimage-extract-and-run --mock --self-test
+      - name: Close-lifecycle test on the packaged AppImage (issue #40)
+        run: |
+          APPIMAGE="$(ls native/dist/521C-*.AppImage)"
+          xvfb-run -a scripts/test-desktop-close.sh "$APPIMAGE" --appimage-extract-and-run
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:

@@ -76,6 +76,16 @@ cargo run -p five21c-desktop --bin 521c -- --mock   # clearly labelled mock back
 cargo run -p five21c-desktop --bin 521c -- --self-test   # launch check, exits 0
 ```
 
+Close-lifecycle gate (issue #40): `scripts/test-desktop-close.sh <command...>`
+launches the app with `--mock --close-self-test`, which opens the window,
+dispatches the same close event a window manager sends, and requires the
+process to exit cleanly within a timeout. CI runs it on both the dev binary
+and the packaged AppImage under `xvfb-run -a`.
+
+```bash
+xvfb-run -a scripts/test-desktop-close.sh native/target/release/521c
+```
+
 The app falls back to the mock transport (visibly) when the BlueZ system bus is
 unavailable. Configuration persists at `~/.config/521c/config.json` (XDG; the
 same validated JSON contract as the browser schema, issue #11).
