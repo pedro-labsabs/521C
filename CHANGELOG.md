@@ -8,6 +8,13 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Added
 
+- Auto-attach for already-connected earbuds: at startup (BlueZ mode) the app
+  detects devices the host is already connected to (e.g. earbuds connected for
+  audio before the app started) and attaches the first candidate
+  automatically — no manual scan/connect needed. New transport method
+  `connected_devices()` (default: none; BlueZ overrides) and new core command
+  `AppCommand::AttachConnected`; model truth and the known-device attestation
+  apply unchanged.
 - Deterministic desktop close-lifecycle gate: `521c --mock --close-self-test`
   dispatches the same `WindowEvent::CloseRequested` a window manager sends and
   passes only when the event loop exits and the persisted config reloads
@@ -34,6 +41,12 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Fixed
 
+- BlueZ connect no longer fails with `org.bluez.Error.Failed:
+  br-connection-busy` when the earbuds are already connected at the host
+  level (e.g. for audio): a redundant `Device1.Connect()` is skipped for
+  devices already marked `Connected`, and busy/already-connected answers are
+  treated as "link already up" and proceed to characteristic resolution
+  (user-reported).
 - Auto Game Mode tracks every active candidate as a set (issue #13 audit
   revalidation): with several concurrent MPRIS players, deactivating one no longer
   turns game mode off while another matching player is still active; non-matching

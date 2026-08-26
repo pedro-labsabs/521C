@@ -87,6 +87,19 @@ is ever added, these same types become the IPC schema unchanged.
   when the selected object resolves no usable GATT. If nothing resolves, the
   error tells the user to wake the BLE side (open the charging case or
   disconnect audio) and retry.
+- Already-connected attach: at startup (BlueZ mode) the app lists devices the
+  host is already connected to (`Transport::connected_devices`) and attaches
+  the first candidate automatically — no manual scan/connect needed when the
+  earbuds were connected for audio before the app started. A redundant
+  `Device1.Connect()` is never issued for a device already marked
+  `Connected`, and BlueZ `br-connection-busy` / `AlreadyConnected` answers are
+  treated as "link already up" and proceed to characteristic resolution.
+- Live-observed firmware behavior (HT08, 2026-08-26): while the earbuds are
+  streaming BR/EDR audio they do not advertise their BLE identity at all, so
+  GATT attach is impossible during an active audio session. The recommended
+  workflow is to attach GATT first (earbuds out of the case, audio not yet
+  connected) and connect audio afterwards; the app reports the asleep-BLE
+  state with actionable guidance instead of failing opaquely.
 - `--mock`: deterministic mock transport, visibly labelled in the UI
   ("MOCK transport (development)" badge). Mock mode never pretends to be
   hardware.

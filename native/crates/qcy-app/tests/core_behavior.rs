@@ -33,6 +33,8 @@ struct TestTransport {
     connected: bool,
     connected_model_known: bool,
     shared: Arc<Mutex<Shared>>,
+    /// Devices reported as already connected at host level (`connected_devices`).
+    connected_list: Vec<DiscoveredDevice>,
 }
 
 impl TestTransport {
@@ -45,6 +47,7 @@ impl TestTransport {
                 connected: false,
                 connected_model_known: false,
                 shared: Arc::clone(&shared),
+                connected_list: Vec::new(),
             },
             shared,
         )
@@ -63,6 +66,10 @@ impl Transport for TestTransport {
             rssi: Some(-55),
             model_known: self.model_known,
         }])
+    }
+
+    fn connected_devices(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
+        Ok(self.connected_list.clone())
     }
 
     fn connect(&mut self, _address: &str) -> Result<(), TransportError> {
@@ -144,6 +151,18 @@ fn start_with(
 
 fn start(model_known: bool) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
     start_with(model_known, Vec::new())
+}
+
+fn start_with_connected(
+    connected_list: Vec<DiscoveredDevice>,
+    known_devices: Vec<String>,
+) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
+    let (mut transport, shared) = TestTransport::new(false);
+    transport.connected_list = connected_list;
+    (
+        AppCore::start(Box::new(transport), HostServices::default(), known_devices),
+        shared,
+    )
 }
 
 /// Collect events until one matches the predicate; fail with the seen events on timeout.
@@ -457,4 +476,70 @@ fn attestation_is_remembered_in_session_but_not_across_restarts() {
     };
     assert!(!snapshot.model_known);
     handle2.shutdown();
+}
+
+/* Auto-attach: devices already connected at the host level (no scan needed) */
+
+#[test]
+fn attach_connected_attaches_an_already_connected_device_without_scanning() {
+    let (handle, _shared) = start_with_connected(
+        vec![DiscoveredDevice {
+            address: ADDR.into(),
+            name: "QCY MeloBuds Pro".into(),
+            rssi: None,
+            model_known: true,
+        }],
+        Vec::new(),
+    );
+    handle.send(AppCommand::AttachConnected).unwrap();
+    // The candidate list is surfaced, then the device attaches.
+    recv_until(&handle, |e| matches!(e, AppEvent::Discovered(_)));
+    let event = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    assert_eq!(snapshot.address, ADDR);
+    assert!(snapshot.model_known);
+    handle.shutdown();
+}
+
+#[test]
+fn attach_connected_is_a_silent_noop_without_connected_devices() {
+    let (handle, _shared) = start(false);
+    handle.send(AppCommand::AttachConnected).unwrap();
+    // Nothing attached; a manual scan still works and no error was emitted in
+    // between (recv_until would surface any Error before the Discovered event).
+    handle.send(AppCommand::Scan).unwrap();
+    let event = recv_until(&handle, |e| matches!(e, AppEvent::Discovered(_)));
+    assert!(matches!(event, AppEvent::Discovered(_)));
+    handle.shutdown();
+}
+
+#[test]
+fn attach_connected_applies_a_previous_model_attestation() {
+    // Renamed earbuds: the connected candidate does not prove the model, but
+    // the address was confirmed before (persisted `knownDevices`), so the
+    // attached session starts writable.
+    let (handle, _shared) = start_with_connected(
+        vec![DiscoveredDevice {
+            address: ADDR.into(),
+            name: "Fones da Carol".into(),
+            rssi: None,
+            model_known: false,
+        }],
+        vec![ADDR.into()],
+    );
+    handle.send(AppCommand::AttachConnected).unwrap();
+    let event = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    assert!(snapshot.model_known, "previous attestation must apply");
+    handle.shutdown();
 }

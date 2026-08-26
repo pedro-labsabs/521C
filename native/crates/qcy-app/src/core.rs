@@ -100,6 +100,12 @@ pub enum MediaCommand {
 pub enum AppCommand {
     Scan,
     Connect(String),
+    /// Attach a device that is already connected at the host level (e.g. the
+    /// earbuds were connected for audio before the application started).
+    /// Lists the already-connected candidates, then attaches the first one —
+    /// no redundant link setup, no user-initiated scan needed. No-op when
+    /// nothing is connected or the app is already attached.
+    AttachConnected,
     /// Explicit user attestation that the currently connected device is a known
     /// model (HT08). Only valid for the connected address; lifts the read-only
     /// state and is reported via [`AppEvent::ModelConfirmed`] so the application
@@ -309,6 +315,35 @@ impl AppCore {
                     })
                 };
 
+                // Shared connect path for `Connect` (user-initiated) and
+                // `AttachConnected` (already-connected at host level).
+                let do_connect = |transport: &mut Box<dyn Transport + Send>,
+                                  snapshot: &mut DeviceSnapshot,
+                                  last_discovered: &[DiscoveredDevice],
+                                  known_devices: &[String],
+                                  address: String|
+                 -> Result<(), String> {
+                    transport
+                        .connect(&address)
+                        .map_err(|e| format!("connect failed: {e}"))?;
+                    snapshot.connected = true;
+                    snapshot.address = address.clone();
+                    if let Some(dev) = last_discovered.iter().find(|d| d.address == address) {
+                        snapshot.name = dev.name.clone();
+                        snapshot.rssi = dev.rssi;
+                        snapshot.model_known = dev.model_known;
+                    }
+                    // A previously confirmed model starts writable.
+                    if !snapshot.model_known
+                        && known_devices.contains(&normalize_address(&address))
+                    {
+                        transport.attest_model_known();
+                        snapshot.model_known = true;
+                    }
+                    refresh_status(transport, snapshot);
+                    Ok(())
+                };
+
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
                         AppCommand::Shutdown => break,
@@ -320,28 +355,48 @@ impl AppCore {
                             Err(e) => emit(AppEvent::Error(format!("scan failed: {e}"))),
                         },
                         AppCommand::Connect(address) => {
-                            match transport.connect(&address) {
-                                Ok(()) => {
-                                    snapshot.connected = true;
-                                    snapshot.address = address.clone();
-                                    if let Some(dev) =
-                                        last_discovered.iter().find(|d| d.address == address)
-                                    {
-                                        snapshot.name = dev.name.clone();
-                                        snapshot.rssi = dev.rssi;
-                                        snapshot.model_known = dev.model_known;
-                                    }
-                                    // A previously confirmed model starts writable.
-                                    if !snapshot.model_known
-                                        && known_devices.contains(&normalize_address(&address))
-                                    {
-                                        transport.attest_model_known();
-                                        snapshot.model_known = true;
-                                    }
-                                    refresh_status(&mut transport, &mut snapshot);
-                                    emit(AppEvent::StateChanged(snapshot.clone()));
+                            match do_connect(
+                                &mut transport,
+                                &mut snapshot,
+                                &last_discovered,
+                                &known_devices,
+                                address,
+                            ) {
+                                Ok(()) => emit(AppEvent::StateChanged(snapshot.clone())),
+                                Err(msg) => emit(AppEvent::Error(msg)),
+                            }
+                        }
+                        AppCommand::AttachConnected => {
+                            if snapshot.connected {
+                                continue;
+                            }
+                            match transport.connected_devices() {
+                                Ok(list) if list.is_empty() => {
+                                    // Nothing connected at host level; the user
+                                    // can still scan manually.
                                 }
-                                Err(e) => emit(AppEvent::Error(format!("connect failed: {e}"))),
+                                Ok(list) => {
+                                    // Deterministic choice: the transport sorts
+                                    // candidates by address.
+                                    let address = list[0].address.clone();
+                                    last_discovered = list.clone();
+                                    emit(AppEvent::Discovered(list));
+                                    match do_connect(
+                                        &mut transport,
+                                        &mut snapshot,
+                                        &last_discovered,
+                                        &known_devices,
+                                        address,
+                                    ) {
+                                        Ok(()) => {
+                                            emit(AppEvent::StateChanged(snapshot.clone()))
+                                        }
+                                        Err(msg) => emit(AppEvent::Error(msg)),
+                                    }
+                                }
+                                Err(e) => {
+                                    emit(AppEvent::Error(format!("attach failed: {e}")))
+                                }
                             }
                         }
                         AppCommand::ConfirmModel { address } => {

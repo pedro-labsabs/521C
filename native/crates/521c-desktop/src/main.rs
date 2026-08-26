@@ -255,6 +255,13 @@ fn main() {
     let host = build_host_services(mock);
     let mut handle = AppCore::start(transport, host, loaded.config.known_devices.clone());
 
+    // Auto-attach: earbuds already connected to the PC (e.g. paired for audio
+    // before the app started) are detected and attached without a manual
+    // scan/connect. No-op when nothing is connected; scan stays available.
+    if !mock {
+        let _ = handle.commands.send(AppCommand::AttachConnected);
+    }
+
     // Auto Game Mode (issue #13 wiring, issue #8): MPRIS player presence drives
     // the earbuds' game mode through the same typed command path as the UI. Off by
     // default (config `autoGame`), event-driven, and writes only happen while
@@ -302,7 +309,7 @@ fn main() {
         if mock {
             "MOCK transport: deterministic development backend, not real hardware."
         } else {
-            "BlueZ transport: scan to find your earbuds."
+            "BlueZ transport: checking for already-connected earbuds (scan to find others)."
         }
         .into(),
     );
