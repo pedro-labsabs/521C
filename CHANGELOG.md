@@ -8,6 +8,39 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Added
 
+- Deterministic desktop close-lifecycle gate: `521c --mock --close-self-test`
+  dispatches the same `WindowEvent::CloseRequested` a window manager sends and
+  passes only when the event loop exits and the persisted config reloads
+  valid; `scripts/test-desktop-close.sh` wraps it with a timeout. CI runs the
+  gate on the dev binary and the packaged AppImage (issue #40).
+- `docs/GOVERNANCE.md` §4 "Release gate enforcement": documents the Free-plan
+  limitation (no paid runners / no branch protection for private repos), the
+  enforced local-ladder workaround, the per-release audit record rule, and the
+  owner action needed to restore the remote gate (issue #41).
+
+### Fixed
+
+- Transport sessions are now transactional (issue #39): a failed connect,
+  failed service resolution, remote disconnect, or replacement connect
+  invalidates the whole session in both the Web Bluetooth and BlueZ
+  transports. Read/write/subscribe report a disconnected error until a full
+  new connection succeeds; no I/O can reach a stale characteristic from a
+  previous device/session. Remote disconnect also emits the disconnected
+  state to `onState` consumers.
+- Normal window close now terminates the desktop app (issue #40): the close
+  handler persists config and ends the Slint event loop, so no invisible
+  survivor process holds BlueZ/MPRIS workers after close.
+
+### Verified (no code change needed)
+
+- Issue #37 (capability vector EOF drift): not present in the committed tree —
+  the audit's failing reproduction came from a reconstructed snapshot;
+  byte-for-byte vector test and both language suites pass at HEAD.
+- Issue #38 (missing AppImage script): the script was present in the committed
+  tree at the audit base; verified end-to-end (build, metadata staging,
+  explicit failure without appimagetool, launch + close gates on the
+  artifact).
+
 - Interactive model confirmation for renamed devices: when a connected device's
   name does not prove the model (e.g. earbuds renamed by their owner), the
   desktop UI offers an explicit "this is a MeloBuds Pro (HT08)" confirmation.
