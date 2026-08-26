@@ -8,12 +8,22 @@
 //!   under the user's PipeWire config directory.
 //! * `disable()` — remove exactly that file. Nothing else is touched.
 //!
-//! This is deliberately non-destructive: 521C never edits system-wide PipeWire config,
-//! never touches other files, and removes only its own artifact. Applying the EQ to a
-//! live audio session depends on PipeWire picking up the config (typically a session or
-//! PipeWire reload); that audio-session behavior requires a live desktop to validate and
-//! is documented as such. The filesystem boundary is injectable so tests run against a
-//! temporary directory, never the user's real config.
+//! The artifact is a complete, valid PipeWire filter-chain fragment: a 10-band
+//! biquad graph (low shelf, eight peaking bands, high shelf) rendered in the exact
+//! syntax of the PipeWire `module-filter-chain` examples for the target platform,
+//! exposed as an "effect sink" pair (`effect_input.521c_system_eq` /
+//! `effect_output.521c_system_eq`). When loaded, the node applies the EQ curve to
+//! whatever is routed through it.
+//!
+//! This is deliberately non-destructive: 521C never edits system-wide PipeWire
+//! config, never touches other files, removes only its own artifact, and never
+//! rewires the session's audio routing. Routing a stream through the EQ node is a
+//! documented, user-controlled step (see `docs/DEVELOPMENT.md`); 521C does not take
+//! over the session manager's routing policy. The artifact is picked up when the
+//! PipeWire filter-chain daemon loads its config (on Ubuntu/Mint-family systems the
+//! dedicated `filter-chain.service` reads `~/.config/pipewire/filter-chain.conf.d/`;
+//! live-validated on PipeWire 1.0.5). The filesystem boundary is injectable so tests
+//! run against a temporary directory, never the user's real config.
 
 use crate::HostError;
 
@@ -25,6 +35,23 @@ pub const EQ_CONFIG_FILE_NAME: &str = "521c-system-eq.conf";
 /// Bounds for a per-band gain in dB.
 pub const GAIN_MIN: f64 = -12.0;
 pub const GAIN_MAX: f64 = 12.0;
+
+/// Center frequencies (Hz) of the 10 System EQ bands, one per band index. The ends
+/// are shelf filters (they shape everything below/above the corner frequency); the
+/// middle bands are peaking filters. Frequencies follow the standard 10-band
+/// graphic-EQ spacing.
+pub const EQ_BAND_FREQUENCIES: [f64; EQ_BAND_COUNT] = [
+    31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+];
+
+/// Quality factor used for every band. `1.0` matches the PipeWire `sink-eq6`
+/// reference example shipped with the target platform.
+pub const EQ_BAND_Q: f64 = 1.0;
+
+/// Node names of the rendered effect-sink pair (input side is an `Audio/Sink` the
+/// user can route streams into; output side carries the equalized audio).
+pub const EQ_INPUT_NODE: &str = "effect_input.521c_system_eq";
+pub const EQ_OUTPUT_NODE: &str = "effect_output.521c_system_eq";
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SystemEqStatus {
@@ -83,7 +110,7 @@ fn validate_gains(gains: &[f64]) -> Result<(), HostError> {
 
 /// PipeWire-backed System EQ that manages a single user-scoped config artifact.
 ///
-/// The config directory is injected (defaults to the user's PipeWire `pipewire.conf.d`);
+/// The config directory is injected (defaults to the user's PipeWire `filter-chain.conf.d`);
 /// tests point it at a temporary directory. Only [`EQ_CONFIG_FILE_NAME`] inside that
 /// directory is ever created or removed.
 pub struct PipewireSystemEq {
@@ -99,13 +126,23 @@ impl PipewireSystemEq {
         }
     }
 
-    /// Default user-scoped PipeWire config directory (`~/.config/pipewire/pipewire.conf.d`).
+    /// Default user-scoped PipeWire filter-chain config directory
+    /// (`~/.config/pipewire/filter-chain.conf.d`).
+    ///
+    /// On Ubuntu/Mint-family systems a dedicated PipeWire filter-chain daemon
+    /// (`filter-chain.service`, running `pipewire -c filter-chain.conf`) loads
+    /// fragments from this directory and its nodes join the main audio graph.
+    /// This is the location the PipeWire documentation for filter fragments
+    /// names, and it was live-validated on PipeWire 1.0.5 (issue #13
+    /// revalidation). On hosts without a filter-chain daemon, the same artifact
+    /// also loads from `~/.config/pipewire/pipewire.conf.d/` (see
+    /// `docs/DEVELOPMENT.md`).
     pub fn default_dir() -> Option<std::path::PathBuf> {
         std::env::var_os("HOME").map(|home| {
             std::path::PathBuf::from(home)
                 .join(".config")
                 .join("pipewire")
-                .join("pipewire.conf.d")
+                .join("filter-chain.conf.d")
         })
     }
 
@@ -113,28 +150,101 @@ impl PipewireSystemEq {
         self.config_dir.join(EQ_CONFIG_FILE_NAME)
     }
 
+    /// Render the managed PipeWire filter-chain fragment.
+    ///
+    /// The graph is a 10-band biquad chain in the exact syntax of the PipeWire
+    /// `module-filter-chain` examples for the target platform (reference:
+    /// `/usr/share/pipewire/filter-chain/sink-eq6.conf`, PipeWire 1.0.5):
+    /// band 0 is a low shelf, bands 1-8 are peaking filters, band 9 is a high
+    /// shelf, all chained in order and exposed as an effect-sink pair. The
+    /// per-band gains (dB) are the user's values, clamped to the validated
+    /// bounds by `enable`.
     fn render_config(gains: &[f64]) -> String {
         let gains_list = gains
             .iter()
             .map(|g| format!("{g:.1}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let band_name = |i: usize| format!("521c_eq_band_{i}");
+        let band_label = |i: usize| {
+            if i == 0 {
+                "bq_lowshelf"
+            } else if i + 1 == EQ_BAND_COUNT {
+                "bq_highshelf"
+            } else {
+                "bq_peaking"
+            }
+        };
+
         let mut out = String::new();
         out.push_str("# 521C System EQ - managed by 521C (issue #13).\n");
         out.push_str("# Created by `521c system-eq on`, removed by `521c system-eq off`.\n");
         out.push_str("# User-scoped and safe to delete; 521C removes it on disable.\n");
+        out.push_str("#\n");
+        out.push_str("# 10-band biquad graph (low shelf + 8 peaking + high shelf). The chain\n");
+        out.push_str(
+            "# is exposed as an effect sink: route audio into `effect_input.521c_system_eq`\n",
+        );
+        out.push_str(
+            "# and link `effect_output.521c_system_eq` to your output device. 521C never\n",
+        );
+        out.push_str("# rewires your session automatically; see docs/DEVELOPMENT.md.\n");
         out.push_str(&format!(
             "# Per-band gains (dB), {EQ_BAND_COUNT} bands: [{gains_list}]\n"
         ));
+        // Machine-readable gains line, parsed by `status` (see `parse_gains_comment`).
+        out.push_str(&format!("# gains = [{gains_list}]\n"));
         out.push_str("context.modules = [\n");
-        out.push_str("{ name = libpipewire-module-filter-chain\n");
-        out.push_str("  args = {\n");
-        out.push_str("    node.description = \"521C System EQ\"\n");
-        out.push_str("    # Band gains managed by 521C; see the PipeWire filter-chain docs\n");
-        out.push_str("    # for the exact EQ filter definition applied to this node.\n");
-        out.push_str(&format!("    # gains = [{gains_list}]\n"));
-        out.push_str("  }\n");
-        out.push_str("}\n");
+        out.push_str("    { name = libpipewire-module-filter-chain\n");
+        out.push_str("        args = {\n");
+        out.push_str("            node.description = \"521C System EQ\"\n");
+        out.push_str("            media.name       = \"521C System EQ\"\n");
+        out.push_str("            filter.graph = {\n");
+        out.push_str("                nodes = [\n");
+        for (i, gain) in gains.iter().enumerate() {
+            let freq = EQ_BAND_FREQUENCIES[i];
+            out.push_str("                    {\n");
+            out.push_str("                        type  = builtin\n");
+            out.push_str(&format!(
+                "                        name  = {}\n",
+                band_name(i)
+            ));
+            out.push_str(&format!(
+                "                        label = {}\n",
+                band_label(i)
+            ));
+            out.push_str(&format!(
+                "                        control = {{ \"Freq\" = {freq:.1} \"Q\" = {EQ_BAND_Q:.1} \"Gain\" = {gain:.1} }}\n"
+            ));
+            out.push_str("                    }\n");
+        }
+        out.push_str("                ]\n");
+        out.push_str("                links = [\n");
+        for i in 0..EQ_BAND_COUNT - 1 {
+            out.push_str(&format!(
+                "                    {{ output = \"{}:Out\" input = \"{}:In\" }}\n",
+                band_name(i),
+                band_name(i + 1)
+            ));
+        }
+        out.push_str("                ]\n");
+        out.push_str("            }\n");
+        out.push_str("            audio.channels = 2\n");
+        out.push_str("            audio.position = [ FL FR ]\n");
+        out.push_str("            capture.props = {\n");
+        out.push_str(&format!(
+            "                node.name   = \"{EQ_INPUT_NODE}\"\n"
+        ));
+        out.push_str("                media.class = Audio/Sink\n");
+        out.push_str("            }\n");
+        out.push_str("            playback.props = {\n");
+        out.push_str(&format!(
+            "                node.name   = \"{EQ_OUTPUT_NODE}\"\n"
+        ));
+        out.push_str("                node.passive = true\n");
+        out.push_str("            }\n");
+        out.push_str("        }\n");
+        out.push_str("    }\n");
         out.push_str("]\n");
         out
     }
@@ -330,5 +440,91 @@ mod tests {
         assert_eq!(parse_gains_comment(&rendered), Some(gains(-2.5)));
         assert_eq!(parse_gains_comment("no gains line here"), None);
         assert_eq!(parse_gains_comment("# gains = [1.0, 2.0]"), None); // wrong band count
+    }
+
+    /* Deterministic filter-graph assertions (issue #13 audit revalidation).
+     *
+     * The rendered artifact must be a complete, valid filter-chain fragment:
+     * 10 biquad nodes with the documented labels/frequencies, chained in order,
+     * exposed as the effect-sink pair. These tests pin the exact graph so a
+     * regression cannot silently degrade the artifact back to a stub. */
+
+    fn band_label(i: usize) -> &'static str {
+        if i == 0 {
+            "bq_lowshelf"
+        } else if i + 1 == EQ_BAND_COUNT {
+            "bq_highshelf"
+        } else {
+            "bq_peaking"
+        }
+    }
+
+    #[test]
+    fn rendered_graph_has_ten_bands_with_documented_labels_and_frequencies() {
+        let user_gains: Vec<f64> = (0..EQ_BAND_COUNT).map(|i| i as f64 - 4.5).collect();
+        let rendered = PipewireSystemEq::render_config(&user_gains);
+        for (i, freq) in EQ_BAND_FREQUENCIES.iter().enumerate() {
+            let name = format!("name  = 521c_eq_band_{i}");
+            assert!(rendered.contains(&name), "missing node {name}");
+            let label = format!("label = {}", band_label(i));
+            assert!(rendered.contains(&label), "missing {label} for band {i}");
+            let control = format!(
+                "control = {{ \"Freq\" = {freq:.1} \"Q\" = {EQ_BAND_Q:.1} \"Gain\" = {:.1} }}",
+                user_gains[i]
+            );
+            assert!(rendered.contains(&control), "missing control: {control}");
+        }
+        // Exactly one control block per band.
+        assert_eq!(rendered.matches("control = {").count(), EQ_BAND_COUNT);
+        assert_eq!(rendered.matches("type  = builtin").count(), EQ_BAND_COUNT);
+    }
+
+    #[test]
+    fn rendered_graph_chains_bands_in_order() {
+        let rendered = PipewireSystemEq::render_config(&gains(0.0));
+        for i in 0..EQ_BAND_COUNT - 1 {
+            let link = format!(
+                "{{ output = \"521c_eq_band_{i}:Out\" input = \"521c_eq_band_{}:In\" }}",
+                i + 1
+            );
+            assert!(rendered.contains(&link), "missing link {link}");
+        }
+        assert_eq!(rendered.matches(":Out\" input").count(), EQ_BAND_COUNT - 1);
+    }
+
+    #[test]
+    fn rendered_graph_exposes_the_effect_sink_pair() {
+        let rendered = PipewireSystemEq::render_config(&gains(0.0));
+        assert!(rendered.contains(&format!("node.name   = \"{EQ_INPUT_NODE}\"")));
+        assert!(rendered.contains("media.class = Audio/Sink"));
+        assert!(rendered.contains(&format!("node.name   = \"{EQ_OUTPUT_NODE}\"")));
+        assert!(rendered.contains("node.passive = true"));
+        assert!(rendered.contains("audio.channels = 2"));
+        assert!(rendered.contains("audio.position = [ FL FR ]"));
+        assert!(rendered.contains("node.description = \"521C System EQ\""));
+    }
+
+    #[test]
+    fn rendered_graph_is_a_single_filter_chain_module() {
+        let rendered = PipewireSystemEq::render_config(&gains(3.0));
+        assert_eq!(
+            rendered.matches("libpipewire-module-filter-chain").count(),
+            1
+        );
+        assert_eq!(rendered.matches("context.modules = [").count(), 1);
+        // The user gains are present both in the machine-readable comment and in
+        // the band control blocks.
+        assert!(rendered.contains(
+            "# Per-band gains (dB), 10 bands: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]"
+        ));
+    }
+
+    #[test]
+    fn default_dir_is_the_user_scoped_filter_chain_conf_d() {
+        // The artifact must live in the user's config tree, never in system paths.
+        let dir = PipewireSystemEq::default_dir().unwrap();
+        let home = std::env::var_os("HOME").unwrap();
+        assert!(dir.starts_with(home));
+        assert!(dir.ends_with("filter-chain.conf.d"));
     }
 }

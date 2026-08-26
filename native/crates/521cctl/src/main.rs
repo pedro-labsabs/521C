@@ -338,7 +338,7 @@ fn system_eq_cmd(sub: &str, gains: &[f64]) -> Result<(), TransportError> {
             };
             eq.enable(&gains).map_err(map)?;
             println!("system-eq enabled ({} bands)", gains.len());
-            println!("note: applying requires PipeWire to load the user config (session reload).");
+            println!("note: applying requires PipeWire to load the artifact, e.g. `systemctl --user restart filter-chain.service` (see docs/DEVELOPMENT.md, Host services).");
         }
         "off" | "disable" => {
             eq.disable().map_err(map)?;
