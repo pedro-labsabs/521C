@@ -69,6 +69,22 @@ Decision rules, in order, for every command block in a frame:
    and resets on restart or transport change.
 6. Anything else is denied as not writable.
 
+**Interactive model confirmation (renamed devices).** When advertisement/name
+evidence cannot prove the model — for example earbuds the owner renamed, so the
+name no longer contains `MeloBuds Pro`/`HT08` — the device stays read-only and the
+UI may offer an explicit confirmation ("this is a QCY MeloBuds Pro (HT08)"). The
+confirmation is an explicit human attestation, treated as identification evidence:
+
+- it applies only to the currently connected device; the core refuses
+  confirmations for any other address;
+- it lifts the read-only state for that connection and is remembered for the rest
+  of the session (reconnects do not re-ask);
+- the application layer persists it as the **local-only** config field
+  `knownDevices` (a bounded address list), never exported and never synced,
+  because Bluetooth addresses are privacy-sensitive;
+- it never changes the policy itself: destructive opcodes stay forbidden and
+  experimental opcodes still require the session opt-in.
+
 Direct (unframed) writes are additionally restricted to the profile's allowlisted
 characteristics. Denials return a structured `{ code, message, opcode? }` result and
 surface as a `WriteDeniedError` at the transport, which the store reports as a toast.

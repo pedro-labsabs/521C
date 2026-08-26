@@ -6,6 +6,31 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ## [Unreleased]
 
+### Added
+
+- Interactive model confirmation for renamed devices: when a connected device's
+  name does not prove the model (e.g. earbuds renamed by their owner), the
+  desktop UI offers an explicit "this is a MeloBuds Pro (HT08)" confirmation.
+  The attestation lifts the read-only state for the connected device, is
+  remembered for the session, and is persisted as the local-only config field
+  `knownDevices` (never exported). Destructive opcodes stay forbidden either
+  way. See `docs/SECURITY_MODEL.md`.
+- Shared config-schema conformance vectors for the local-only `knownDevices`
+  field (valid + invalid cases, consumed by both the TypeScript and Rust
+  suites).
+
+### Changed
+
+- `Transport` gains `attest_model_known()` (session-scoped, connection-bound);
+  `AppCore::start` now takes the persisted `knownDevices` list so previously
+  confirmed devices start writable.
+- BlueZ transport dual-mode handling: `scan` now watches discovery for a bounded
+  window instead of taking a single instant snapshot, and `connect` falls back
+  to the BLE identity of a dual-mode device (same advertised name, or the QCY
+  vendor service in the device `UUIDs`) when the selected object has no usable
+  GATT. Connection failures map to structured errors with actionable guidance
+  (e.g. open the charging case / disconnect audio so the BLE identity wakes).
+
 ## [0.1.0-rc.1] - 2026-08-25
 
 First desktop release candidate. Release notes, verification evidence and

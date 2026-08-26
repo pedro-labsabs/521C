@@ -252,7 +252,7 @@ fn main() {
         }
     };
     let host = build_host_services(mock);
-    let mut handle = AppCore::start(transport, host);
+    let mut handle = AppCore::start(transport, host, loaded.config.known_devices.clone());
 
     // Auto Game Mode (issue #13 wiring, issue #8): MPRIS player presence drives
     // the earbuds' game mode through the same typed command path as the UI. Off by
@@ -334,6 +334,23 @@ fn main() {
         let sender = handle.commands.clone();
         app.on_refresh_clicked(move || {
             let _ = sender.send(AppCommand::RefreshStatus);
+        });
+    }
+    {
+        let sender = handle.commands.clone();
+        let weak = app.as_weak();
+        app.on_confirm_model_clicked(move || {
+            // The address comes from the connected snapshot shown in the UI;
+            // the core still refuses confirmations for anything but the
+            // currently connected device.
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let address = app.global::<AppState>().get_device_address().to_string();
+            if address.is_empty() || address == "—" {
+                return;
+            }
+            let _ = sender.send(AppCommand::ConfirmModel { address });
         });
     }
     {
@@ -425,11 +442,16 @@ fn main() {
         });
     }
 
+    // Shared config: the event pump persists model attestations immediately
+    // (crash-safe); the exit handler saves the final state.
+    let shared_config = Arc::new(Mutex::new(loaded.config.clone()));
+
     // ---- event pump: typed events -> UI state ------------------------------
     let events = handle.take_events().expect("event receiver available");
     let devices_pump = Arc::clone(&devices);
     let connected_pump = Arc::clone(&connected_flag);
     let desired_pump = Arc::clone(&auto_game_desired);
+    let config_pump = Arc::clone(&shared_config);
     let pump_commands = handle.commands.clone();
     let weak = app.as_weak();
     std::thread::Builder::new()
@@ -438,6 +460,7 @@ fn main() {
             while let Ok(event) = events.recv() {
                 let devices = Arc::clone(&devices_pump);
                 let connected_flag = Arc::clone(&connected_pump);
+                let config = Arc::clone(&config_pump);
                 let auto_game_desired = Arc::clone(&desired_pump);
                 let sender = pump_commands.clone();
                 let weak = weak.clone();
@@ -533,6 +556,27 @@ fn main() {
                             let log = state.get_event_log();
                             state.set_event_log(append_log(&log, &message).into());
                         }
+                        AppEvent::ModelConfirmed { address } => {
+                            // Persist the attestation immediately (local-only
+                            // field) so it survives crashes, not just clean exit.
+                            {
+                                let mut cfg = config.lock().expect("config mutex");
+                                if !cfg.known_devices.contains(&address) {
+                                    cfg.known_devices.push(address.clone());
+                                }
+                                let mut storage = XdgStorage::default_path()
+                                    .map(XdgStorage::new)
+                                    .expect("XDG config path resolvable");
+                                config::save_persisted_config(&mut storage, &cfg);
+                            }
+                            state.set_status_line(
+                                format!("Model confirmed for {address}; controls enabled.").into(),
+                            );
+                            let log = state.get_event_log();
+                            state.set_event_log(
+                                append_log(&log, &format!("Model confirmed: {address}")).into(),
+                            );
+                        }
                     }
                 });
                 if ok.is_err() {
@@ -557,13 +601,14 @@ fn main() {
         return;
     }
 
-    let config_for_exit = loaded.config.clone();
+    let config_for_exit = Arc::clone(&shared_config);
     app.window().on_close_requested(move || {
         // Persist the full local config (portable + local-only) on clean exit.
+        let cfg = config_for_exit.lock().expect("config mutex");
         let mut storage = XdgStorage::default_path()
             .map(XdgStorage::new)
             .expect("XDG config path resolvable");
-        config::save_persisted_config(&mut storage, &config_for_exit);
+        config::save_persisted_config(&mut storage, &cfg);
         slint::CloseRequestResponse::HideWindow
     });
 

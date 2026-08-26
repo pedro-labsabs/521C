@@ -77,6 +77,7 @@ function validPersisted(over: Record<string, unknown> = {}): PersistedConfig {
     hideMac: true,
     sleepTimerMin: 30,
     lastSeen: { at: "2025-01-01T00:00:00.000Z", host: "this-computer", rssi: -52 },
+    knownDevices: ["84:AC:60:62:69:DA"],
     ...over,
   };
 }
@@ -126,6 +127,8 @@ describe("config schema round-trip", () => {
     expect(exported).not.toContain("sleepTimerMin");
     expect(exported).not.toContain("lastSeen");
     expect(exported).not.toContain("this-computer");
+    expect(exported).not.toContain("knownDevices");
+    expect(exported).not.toContain("84:AC:60:62:69:DA");
   });
 });
 

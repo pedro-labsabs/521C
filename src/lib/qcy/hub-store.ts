@@ -78,6 +78,12 @@ export type HubState = {
   autoGame: boolean;
   autoGameKeyword: string;
   sleepTimerMin: number;
+  /**
+   * Addresses whose model the user confirmed (local-only). The web surface does
+   * not manage this list; it carries it through persistence untouched so
+   * re-saving browser config never destroys it.
+   */
+  knownDevices: string[];
   eqAb: { a: number[]; b: number[]; using: "a" | "b" } | null;
   systemEqOn: boolean;
   systemEqGains: number[];
@@ -176,6 +182,7 @@ function persistFrom(get: () => HubState) {
     autoGameKeyword: s.autoGameKeyword,
     sleepTimerMin: s.sleepTimerMin,
     lastSeen: s.device.lastSeen,
+    knownDevices: s.knownDevices,
   });
 }
 
@@ -275,6 +282,7 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
   autoGame: persisted.autoGame,
   autoGameKeyword: persisted.autoGameKeyword,
   sleepTimerMin: persisted.sleepTimerMin,
+  knownDevices: persisted.knownDevices,
   eqAb: null,
   systemEqOn: false,
   systemEqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
