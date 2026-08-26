@@ -20,6 +20,12 @@ network behavior.
 - Firmware OTA remains disabled until the full image format, integrity mechanism, interruption behavior, and recovery path are independently verified.
 - Avoid root and privileged daemon replacement.
 - Do not add telemetry as a hidden dependency or default behavior.
+- Device sessions are transactional: a failed connect, a failed service/
+  characteristic resolution, a remote disconnect, or a replacement connect
+  invalidates the whole session (device identity and every cached GATT handle).
+  Read/write/subscribe report a disconnected error until a complete new
+  connection succeeds; no I/O may ever be routed to a stale characteristic
+  from a previous device/session.
 
 ## Network behavior (local-first)
 

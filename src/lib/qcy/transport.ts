@@ -801,6 +801,9 @@ export class WebBluetoothTransport implements QcyTransport {
     if (this.connectInFlight) return; // idempotent
     this.connectInFlight = true;
     this.events = events;
+    // Transactional replacement: a new connection attempt must never inherit
+    // characteristic handles from a previous device/session.
+    this.invalidateSession();
     try {
       const device = this.device;
       if (!device?.gatt) throw new Error("No Bluetooth device selected.");
@@ -836,19 +839,41 @@ export class WebBluetoothTransport implements QcyTransport {
         notify.addEventListener("characteristicvaluechanged", (ev) => this.handleNotification(ev));
       }
       device.addEventListener("gattserverdisconnected", () => {
+        // Remote disconnect invalidates the whole session: cached handles must
+        // not survive, or a later write could target a stale characteristic.
+        this.invalidateSession();
         this.state = { ...this.state, connected: false, connecting: false };
+        this.events?.onState(this.state);
         this.events?.onDisconnected("gatt-disconnected");
       });
       this.state = { ...this.state, connecting: false, connected: true };
       events.onState(this.state);
       await this.initialSync();
     } catch (err) {
+      // Failed connect/resolution leaves no session behind: read/write/
+      // subscribe report disconnected until a full new connection succeeds.
+      this.invalidateSession();
       this.state = { ...this.state, connecting: false, connected: false };
       this.events?.onState(this.state);
       throw err;
     } finally {
       this.connectInFlight = false;
     }
+  }
+
+  /**
+   * Forget the current GATT session: cached characteristics and the server
+   * reference are cleared, and the underlying server is disconnected
+   * best-effort. Never throws.
+   */
+  private invalidateSession(): void {
+    this.chars.clear();
+    try {
+      this.server?.disconnect();
+    } catch {
+      // Already disconnected; invalidation must not fail the caller.
+    }
+    this.server = null;
   }
 
   private handleNotification(ev: Event): void {
@@ -919,6 +944,7 @@ export class WebBluetoothTransport implements QcyTransport {
   async write(bytes: Uint8Array): Promise<void> {
     const auth = authorizeFrameWrite(this.state.profile, this.optIn, bytes);
     if (!auth.ok) throw new WriteDeniedError(auth.denial);
+    if (!this.state.connected) throw new Error("Not connected");
     const char = this.chars.get(CHAR.commandWrite);
     if (!char) throw new Error("Not connected");
     this.events?.onLog({
@@ -935,6 +961,7 @@ export class WebBluetoothTransport implements QcyTransport {
   async writeDirect(charUuid: string, bytes: Uint8Array): Promise<void> {
     const auth = authorizeDirectWrite(this.state.profile, this.optIn, charUuid, bytes);
     if (!auth.ok) throw new WriteDeniedError(auth.denial);
+    if (!this.state.connected) throw new Error("Not connected");
     const char = await this.resolveChar(charUuid);
     if (!char) throw new Error(`Characteristic ${charUuid} is not available`);
     this.events?.onLog({
@@ -949,6 +976,7 @@ export class WebBluetoothTransport implements QcyTransport {
   }
 
   async read(charUuid: string): Promise<Uint8Array> {
+    if (!this.state.connected) throw new Error("Not connected");
     const char = await this.resolveChar(charUuid);
     if (!char) return new Uint8Array();
     const view = await char.readValue();
