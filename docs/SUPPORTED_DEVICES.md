@@ -33,9 +33,9 @@ earbud write) · **P** protocol known, app pending · **R** needs protocol resea
 | Transparency + levels | S | 0x0C / 0x17 0x0A |
 | Vocal enhance | R | Mentioned in reviews; no named opcode yet |
 | Game mode | S | 0x09 |
-| Auto game mode | Host | qcy-host: MPRIS player-presence signal + debounce + keyword allowlist, no polling. Device-write wiring lands with the desktop app (#8); no BLE traffic while idle |
+| Auto game mode | Host | qcy-host: MPRIS player-presence signal + debounce + keyword allowlist, no polling; tracks all active candidates as a set (one player leaving never clears another). Wired by the desktop app (#8); no BLE traffic while idle |
 | Device EQ | S | 0x22 |
-| System EQ | Host | qcy-host manages one user-scoped PipeWire config artifact (`521cctl system-eq on/off/status`). Never written to buds |
+| System EQ | Host | qcy-host manages one user-scoped PipeWire filter-chain artifact — a complete 10-band biquad graph exposed as an effect sink, live-validated on PipeWire 1.0.5 (`521cctl system-eq on/off/status`; routing documented, user-controlled). Never written to buds |
 | Touch mapping | S | char 0000000D |
 | Wear detection | S | 0x06 / 0x2C |
 | Sleep mode | S | 0x10 |

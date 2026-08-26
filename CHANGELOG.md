@@ -18,8 +18,27 @@ defined in `docs/GOVERNANCE.md` §4.
   enforced local-ladder workaround, the per-release audit record rule, and the
   owner action needed to restore the remote gate (issue #41).
 
+### Changed
+
+- System EQ now renders a complete, valid PipeWire filter-chain artifact (issue #13
+  audit revalidation): a 10-band biquad graph (low shelf 31 Hz, peaking bands
+  62 Hz–8 kHz, high shelf 16 kHz, Q = 1.0, gains ±12 dB) in the exact syntax of the
+  target platform's filter-chain examples, exposed as the effect-sink pair
+  `effect_input.521c_system_eq` / `effect_output.521c_system_eq`. The artifact moves
+  to `~/.config/pipewire/filter-chain.conf.d/` (loaded by the dedicated filter-chain
+  daemon on Ubuntu/Mint-family systems; fallback documented). Live-validated on
+  PipeWire 1.0.5: enable → nodes join the main graph with correct ports → disable →
+  clean removal. Routing through the EQ stays a documented, user-controlled step;
+  521C never rewires the session automatically. Deterministic tests pin the rendered
+  graph (band labels, frequencies, gains, link chain, effect-sink props).
+
 ### Fixed
 
+- Auto Game Mode tracks every active candidate as a set (issue #13 audit
+  revalidation): with several concurrent MPRIS players, deactivating one no longer
+  turns game mode off while another matching player is still active; non-matching
+  players neither activate nor sustain it; deactivating an unknown candidate is a
+  no-op. Multi-player interleaving and cooldown determinism are covered by tests.
 - Transport sessions are now transactional (issue #39): a failed connect,
   failed service resolution, remote disconnect, or replacement connect
   invalidates the whole session in both the Web Bluetooth and BlueZ

@@ -172,17 +172,45 @@ Linux Mint runtime dependencies for these features:
   transport is preferred; sample rate is parsed for SBC/MPEG/AAC/LDAC layouts. Fields
   that cannot be sourced are reported as `unknown` (never invented). No transport is
   acquired or modified.
-- **System EQ** — PipeWire with user config under `~/.config/pipewire/pipewire.conf.d/`.
-  521C creates/removes only its own `521c-system-eq.conf`; `system-eq status` reads the
-  artifact from disk, so it is correct across CLI invocations. Applying requires
-  PipeWire to reload (typically a session restart). No system-wide config is touched.
+- **System EQ** — PipeWire `module-filter-chain` with a user-scoped artifact at
+  `~/.config/pipewire/filter-chain.conf.d/521c-system-eq.conf`. The artifact is a
+  complete 10-band biquad graph (low shelf at 31 Hz, peaking bands at
+  62/125/250/500/1k/2k/4k/8k Hz, high shelf at 16 kHz, Q = 1.0, gains ±12 dB) in the
+  exact syntax of the PipeWire filter-chain examples for the target platform
+  (reference: `/usr/share/pipewire/filter-chain/sink-eq6.conf`), exposed as an effect
+  sink: `effect_input.521c_system_eq` (an `Audio/Sink` you can route streams into)
+  and `effect_output.521c_system_eq` (the equalized output). 521C creates/removes
+  only its own artifact; `system-eq status` reads it from disk, so it is correct
+  across CLI invocations. No system-wide config is touched and 521C never rewires
+  your audio routing.
+  - *Loading:* on Ubuntu/Mint-family systems the dedicated filter-chain daemon
+    (`systemctl --user restart filter-chain.service`) picks the artifact up and the
+    EQ nodes join the main audio graph (live-validated on PipeWire 1.0.5). On hosts
+    without that daemon, copy/move the artifact to `~/.config/pipewire/pipewire.conf.d/`
+    and restart PipeWire instead.
+  - *Routing (user-controlled, by design):* send audio to the EQ sink, then link the
+    EQ output to your device, e.g. with `pw-link`:
+
+    ```bash
+    # make the EQ the default output (WirePlumber), or route a specific stream to it
+    wpctl set-default effect_input.521c_system_eq
+    # then connect the equalized output to your real sink (names from `pw-link -s`):
+    pw-link effect_output.521c_system_eq:output_0 <your_sink>:playback_FL
+    pw-link effect_output.521c_system_eq:output_1 <your_sink>:playback_FR
+    ```
+
+    Any patch bay (qpwgraph, helvum) can make the same links. To stop using the EQ,
+    restore your normal default output and run `521cctl system-eq off`.
 - **Auto Game Mode** — the chosen host signal is MPRIS player presence: players
   appearing/disappearing as `org.mpris.MediaPlayer2.*` bus names are delivered by the
   session bus as `NameOwnerChanged` signals (a genuine subscription, no polling). The
   candidate name matched against the keyword allowlist is the bus-name suffix (e.g.
-  `vlc`, `steam`). The controller debounces transitions; applications without an MPRIS
-  name cannot trigger game mode. Device writes happen only through the central write
-  policy once the desktop application (#8) wires the controller.
+  `vlc`, `steam`). The controller tracks every active candidate as a set: with
+  several concurrent players, deactivating one never turns game mode off while
+  another matching player is still active, and non-matching players neither activate
+  nor sustain it. Transitions are debounced by a cooldown; applications without an
+  MPRIS name cannot trigger game mode. Device writes happen only through the central
+  write policy (wired by the desktop application, #8).
 
 Missing services are handled gracefully. The live D-Bus integration is behind the `dbus`
 Cargo feature (default on); the traits, rule engine and lifecycle logic always build and

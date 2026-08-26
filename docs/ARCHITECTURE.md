@@ -67,7 +67,7 @@ interface from `Transport` and the protocol codecs:
 | MPRIS | media discovery/state/control over `org.mpris.MediaPlayer2` (session bus, zbus) | fabricate metadata; touch the buds |
 | Codec | reads codec/sample-rate/profile passively from BlueZ `MediaTransport1` (system bus); unknown when unavailable | invent a value; acquire/modify any transport |
 | Auto Game Mode | MPRIS player-presence signal (`NameOwnerChanged`) + debounce + keyword allowlist | busy-poll; write while idle; write outside the central policy |
-| System EQ | one user-scoped PipeWire config artifact, create/remove lifecycle, disk-backed status | edit system-wide PipeWire config |
+| System EQ | one user-scoped PipeWire filter-chain artifact (complete 10-band biquad graph exposed as an effect sink), create/remove lifecycle, disk-backed status; routing stays user-controlled | edit system-wide PipeWire config; rewire the session automatically |
 
 Host-only state is never written to the device and is never presented as earbud
 DSP/protocol support; in the capability/truth model these stay `hardware: unknown`,

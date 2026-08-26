@@ -72,8 +72,10 @@ pub struct GameModeController {
     last_transition_ms: Option<u64>,
     /// The currently believed game-mode state.
     on: bool,
-    /// The name currently considered active (last Activated that has not deactivated).
-    active: Option<String>,
+    /// Every candidate currently active. Tracked as a set so that with several
+    /// concurrent players (e.g. two MPRIS players) deactivating one never clears
+    /// another that is still active (issue #13 audit revalidation).
+    active: std::collections::BTreeSet<String>,
 }
 
 impl GameModeController {
@@ -83,8 +85,13 @@ impl GameModeController {
             cooldown_ms: cooldown.as_millis() as u64,
             last_transition_ms: None,
             on: false,
-            active: None,
+            active: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// The currently active candidate names, in deterministic order.
+    pub fn active_candidates(&self) -> Vec<String> {
+        self.active.iter().cloned().collect()
     }
 
     pub fn is_on(&self) -> bool {
@@ -95,10 +102,16 @@ impl GameModeController {
     /// responsible for actually sending the device write (through the central policy).
     pub fn handle(&mut self, event: GameModeEvent, now_ms: u64) -> GameModeDecision {
         match event {
-            GameModeEvent::Activated(name) => self.active = Some(name),
-            GameModeEvent::Deactivated(_) => self.active = None,
+            GameModeEvent::Activated(name) => {
+                self.active.insert(name);
+            }
+            // Remove exactly the candidate that deactivated; every other still-active
+            // candidate stays tracked. Deactivating an unknown name is a no-op.
+            GameModeEvent::Deactivated(name) => {
+                self.active.remove(&name);
+            }
         }
-        let desired = self.rule.evaluate(self.active.as_deref());
+        let desired = self.active.iter().any(|name| self.rule.matches(name));
         if desired == self.on {
             return GameModeDecision {
                 game_mode_on: self.on,
@@ -419,5 +432,76 @@ mod tests {
             now_ms += 1000;
         }
         assert_eq!(device_writes, vec![true, false]);
+    }
+
+    /* Multi-player semantics (issue #13 audit revalidation) */
+
+    #[test]
+    fn deactivating_one_of_two_matching_players_keeps_game_mode_on() {
+        let mut c = controller(&["game"], 1000);
+        let a = c.handle(GameModeEvent::Activated("game one".into()), 0);
+        assert!(a.changed && a.game_mode_on);
+        // Second matching player appears: desired state unchanged, no write.
+        let b = c.handle(GameModeEvent::Activated("game two".into()), 100);
+        assert!(!b.changed);
+        assert!(c.is_on());
+        // First player leaves: the second still matches, so game mode stays on.
+        let d = c.handle(GameModeEvent::Deactivated("game one".into()), 2000);
+        assert!(!d.changed);
+        assert!(c.is_on());
+        assert_eq!(c.active_candidates(), vec!["game two".to_string()]);
+        // Only when the last matching player leaves does game mode turn off.
+        let off = c.handle(GameModeEvent::Deactivated("game two".into()), 3100);
+        assert!(off.changed && !off.game_mode_on);
+        assert!(c.active_candidates().is_empty());
+    }
+
+    #[test]
+    fn non_matching_player_neither_activates_nor_sustains_game_mode() {
+        let mut c = controller(&["game"], 1000);
+        // Non-matching player alone: stays off.
+        let d = c.handle(GameModeEvent::Activated("music player".into()), 0);
+        assert!(!d.changed && !d.game_mode_on);
+        // Matching player joins: turns on.
+        let on = c.handle(GameModeEvent::Activated("my game".into()), 1100);
+        assert!(on.changed && on.game_mode_on);
+        // Matching player leaves while the non-matching one is still active:
+        // game mode turns off; the non-matching candidate stays tracked.
+        let off = c.handle(GameModeEvent::Deactivated("my game".into()), 2200);
+        assert!(off.changed && !off.game_mode_on);
+        assert_eq!(c.active_candidates(), vec!["music player".to_string()]);
+        // If a matching player returns, it turns back on.
+        let on2 = c.handle(GameModeEvent::Activated("another game".into()), 3300);
+        assert!(on2.changed && on2.game_mode_on);
+    }
+
+    #[test]
+    fn deactivating_an_unknown_candidate_is_a_noop() {
+        let mut c = controller(&["game"], 1000);
+        c.handle(GameModeEvent::Activated("my game".into()), 0);
+        let d = c.handle(GameModeEvent::Deactivated("never seen".into()), 1100);
+        assert!(!d.changed);
+        assert!(c.is_on());
+        assert_eq!(c.active_candidates(), vec!["my game".to_string()]);
+    }
+
+    #[test]
+    fn cooldown_stays_deterministic_with_interleaved_players() {
+        let mut c = controller(&["game"], 1000);
+        let on = c.handle(GameModeEvent::Activated("game a".into()), 0);
+        assert!(on.changed && on.game_mode_on);
+        // Within the cooldown window the last matching player leaves: the off
+        // transition is suppressed and game mode stays on.
+        let sup = c.handle(GameModeEvent::Deactivated("game a".into()), 100);
+        assert!(sup.suppressed && !sup.changed);
+        assert!(c.is_on());
+        assert!(c.active_candidates().is_empty());
+        // After the cooldown, a fresh matching activation is a no-op (already on),
+        // and the next real transition is allowed deterministically.
+        let again = c.handle(GameModeEvent::Activated("game b".into()), 1200);
+        assert!(!again.changed);
+        assert!(c.is_on());
+        let off = c.handle(GameModeEvent::Deactivated("game b".into()), 2300);
+        assert!(off.changed && !off.game_mode_on);
     }
 }
