@@ -93,6 +93,36 @@
         "customProfilesCount": 0,
         "notifyConnected": true
       }
+    },
+    {
+      "name": "knownDevices persists locally (stored-only)",
+      "storedOnly": true,
+      "json": { "knownDevices": ["84:AC:60:62:69:DA"] },
+      "expect": {
+        "theme": "dark",
+        "activeProfileId": "music",
+        "autoGame": false,
+        "autoGameKeyword": "game",
+        "customEqCount": 0,
+        "customProfilesCount": 0,
+        "notifyConnected": true,
+        "knownDevicesCount": 1
+      }
+    },
+    {
+      "name": "stored payload without knownDevices defaults to empty list",
+      "storedOnly": true,
+      "json": {},
+      "expect": {
+        "theme": "dark",
+        "activeProfileId": "music",
+        "autoGame": false,
+        "autoGameKeyword": "game",
+        "customEqCount": 0,
+        "customProfilesCount": 0,
+        "notifyConnected": true,
+        "knownDevicesCount": 0
+      }
     }
   ],
   "invalid": [
@@ -137,6 +167,11 @@
     { "name": "too many custom profiles", "json": {
       "customProfiles": "OVER_LIMIT_MARKER"
     }, "expectErrorPathPrefix": "customProfiles", "note": "the consumer constructs 65 valid profiles; the marker is replaced programmatically" },
-    { "name": "newer schema refused", "json": { "schema": 2, "theme": "dark" }, "expectErrorPathPrefix": "schema", "storedOnly": true }
+    { "name": "newer schema refused", "json": { "schema": 2, "theme": "dark" }, "expectErrorPathPrefix": "schema", "storedOnly": true },
+    { "name": "knownDevices must be an array", "json": { "knownDevices": "84:AC:60:62:69:DA" }, "expectErrorPathPrefix": "knownDevices", "storedOnly": true },
+    { "name": "knownDevices entry must be a string", "json": { "knownDevices": [123] }, "expectErrorPathPrefix": "knownDevices[0]", "storedOnly": true },
+    { "name": "knownDevices entry must not be empty", "json": { "knownDevices": ["   "] }, "expectErrorPathPrefix": "knownDevices[0]", "storedOnly": true },
+    { "name": "knownDevices entry too long", "json": { "knownDevices": ["84:AC:60:62:69:DA:EXTRA:TOO:LONG:FOR:THE:LIMIT"] }, "expectErrorPathPrefix": "knownDevices[0]", "storedOnly": true },
+    { "name": "too many knownDevices", "json": { "knownDevices": ["AA:BB:CC:DD:EE:00", "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:03", "AA:BB:CC:DD:EE:04", "AA:BB:CC:DD:EE:05", "AA:BB:CC:DD:EE:06", "AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:08", "AA:BB:CC:DD:EE:09", "AA:BB:CC:DD:EE:0A", "AA:BB:CC:DD:EE:0B", "AA:BB:CC:DD:EE:0C", "AA:BB:CC:DD:EE:0D", "AA:BB:CC:DD:EE:0E", "AA:BB:CC:DD:EE:0F", "AA:BB:CC:DD:EE:10"] }, "expectErrorPathPrefix": "knownDevices", "storedOnly": true }
   ]
 }

@@ -123,14 +123,27 @@ impl Transport for TestTransport {
     fn set_experimental_opt_in(&mut self, on: bool) {
         self.shared.lock().expect("shared mutex").opt_in = on;
     }
+
+    fn attest_model_known(&mut self) {
+        if self.connected {
+            self.connected_model_known = true;
+        }
+    }
+}
+
+fn start_with(
+    model_known: bool,
+    known_devices: Vec<String>,
+) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
+    let (transport, shared) = TestTransport::new(model_known);
+    (
+        AppCore::start(Box::new(transport), HostServices::default(), known_devices),
+        shared,
+    )
 }
 
 fn start(model_known: bool) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
-    let (transport, shared) = TestTransport::new(model_known);
-    (
-        AppCore::start(Box::new(transport), HostServices::default()),
-        shared,
-    )
+    start_with(model_known, Vec::new())
 }
 
 /// Collect events until one matches the predicate; fail with the seen events on timeout.
@@ -321,4 +334,127 @@ fn disconnect_resets_the_snapshot() {
     assert!(snapshot.firmware.is_none());
     assert!(snapshot.address.is_empty());
     handle.shutdown();
+}
+
+#[test]
+fn confirm_model_requires_the_connected_device() {
+    let (handle, _shared) = start(false);
+    // No connection at all: refused.
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: ADDR.into(),
+        })
+        .unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Error(_)));
+    // Connected, but a different address: refused.
+    scan_and_connect(&handle);
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: "00:11:22:33:44:55".into(),
+        })
+        .unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Error(_)));
+    handle.shutdown();
+}
+
+#[test]
+fn confirm_model_lifts_read_only_and_reports_attestation() {
+    let (handle, shared) = start(false);
+    scan_and_connect(&handle);
+
+    // Unknown model: writes are denied read-only.
+    handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Denied(_)));
+    assert!(shared.lock().expect("shared mutex").writes.is_empty());
+
+    // Explicit user confirmation lifts the read-only state.
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: ADDR.into(),
+        })
+        .unwrap();
+    let event = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::ModelConfirmed { address } if address == ADDR),
+    );
+    assert!(matches!(event, AppEvent::ModelConfirmed { .. }));
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.model_known),
+    );
+
+    // Supported writes now reach the transport.
+    handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Info(_)));
+    let writes = shared.lock().expect("shared mutex").writes.clone();
+    assert_eq!(writes.len(), 1);
+    let frame = decode_packet(&writes[0]).expect("frame decodes");
+    assert_eq!(frame.blocks[0].cmd, 0x0C);
+    handle.shutdown();
+}
+
+#[test]
+fn previously_attested_address_connects_writable() {
+    let (handle, shared) = start_with(false, vec![ADDR.into()]);
+    handle.send(AppCommand::Scan).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Discovered(_)));
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    let event = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    assert!(
+        snapshot.model_known,
+        "a persisted attestation must make the connection writable"
+    );
+    handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Info(_)));
+    assert_eq!(shared.lock().expect("shared mutex").writes.len(), 1);
+    handle.shutdown();
+}
+
+#[test]
+fn attestation_is_remembered_in_session_but_not_across_restarts() {
+    let (handle, _shared) = start(false);
+    scan_and_connect(&handle);
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: ADDR.into(),
+        })
+        .unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::ModelConfirmed { .. }));
+    // Within the same session a reconnect stays writable (no re-asking).
+    handle.send(AppCommand::Disconnect).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if !s.connected),
+    );
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    let event = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    assert!(snapshot.model_known);
+    handle.shutdown();
+
+    // A fresh core without a persisted attestation starts read-only again:
+    // cross-launch persistence is owned by the application layer (config).
+    let (handle2, _shared2) = start(false);
+    scan_and_connect(&handle2);
+    handle2.send(AppCommand::RefreshStatus).unwrap();
+    let event = recv_until(
+        &handle2,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    assert!(!snapshot.model_known);
+    handle2.shutdown();
 }

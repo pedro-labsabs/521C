@@ -24,7 +24,7 @@ use qcy_host::mpris::MediaStatus;
 use qcy_host::system_eq::SystemEqStatus;
 use qcy_protocol::packet::encode_command;
 use qcy_protocol::{BatteryState, Cmd};
-use qcy_transport::{DiscoveredDevice, Transport, TransportError};
+use qcy_transport::{normalize_address, DiscoveredDevice, Transport, TransportError};
 
 /// Characteristic UUIDs used for proven reads (see docs/PROTOCOL.md).
 pub const CHAR_BATTERY: &str = "00000008-0000-1000-8000-00805f9b34fb";
@@ -100,6 +100,13 @@ pub enum MediaCommand {
 pub enum AppCommand {
     Scan,
     Connect(String),
+    /// Explicit user attestation that the currently connected device is a known
+    /// model (HT08). Only valid for the connected address; lifts the read-only
+    /// state and is reported via [`AppEvent::ModelConfirmed`] so the application
+    /// layer can persist it (local-only config field `knownDevices`).
+    ConfirmModel {
+        address: String,
+    },
     Disconnect,
     RefreshStatus,
     SetNoise(SimpleNoise),
@@ -139,6 +146,12 @@ pub enum AppEvent {
     Error(String),
     /// A write was denied by the central policy (surfaced distinctly for the UI).
     Denied(String),
+    /// The user confirmed the connected device's model; the application layer
+    /// should persist the address (local-only) so future connections start
+    /// writable.
+    ModelConfirmed {
+        address: String,
+    },
     Info(String),
 }
 
@@ -231,7 +244,14 @@ impl Drop for AppHandle {
 pub struct AppCore;
 
 impl AppCore {
-    pub fn start(transport: Box<dyn Transport + Send>, mut host: HostServices) -> AppHandle {
+    /// Start the core. `known_devices` is the list of addresses whose model the
+    /// user already confirmed (local-only config field `knownDevices`); matching
+    /// connections start writable without re-asking.
+    pub fn start(
+        transport: Box<dyn Transport + Send>,
+        mut host: HostServices,
+        known_devices: Vec<String>,
+    ) -> AppHandle {
         let (cmd_tx, cmd_rx) = channel::<AppCommand>();
         let (event_tx, event_rx) = channel::<AppEvent>();
 
@@ -239,6 +259,8 @@ impl AppCore {
             .name("521c-app-core".into())
             .spawn(move || {
                 let mut transport = transport;
+                let mut known_devices: Vec<String> =
+                    known_devices.iter().map(|a| normalize_address(a)).collect();
                 let mut snapshot = DeviceSnapshot::default();
                 let mut last_discovered: Vec<DiscoveredDevice> = Vec::new();
                 let mut experimental_opt_in = false;
@@ -309,11 +331,37 @@ impl AppCore {
                                         snapshot.rssi = dev.rssi;
                                         snapshot.model_known = dev.model_known;
                                     }
+                                    // A previously confirmed model starts writable.
+                                    if !snapshot.model_known
+                                        && known_devices.contains(&normalize_address(&address))
+                                    {
+                                        transport.attest_model_known();
+                                        snapshot.model_known = true;
+                                    }
                                     refresh_status(&mut transport, &mut snapshot);
                                     emit(AppEvent::StateChanged(snapshot.clone()));
                                 }
                                 Err(e) => emit(AppEvent::Error(format!("connect failed: {e}"))),
                             }
+                        }
+                        AppCommand::ConfirmModel { address } => {
+                            let normalized = normalize_address(&address);
+                            if !snapshot.connected
+                                || normalize_address(&snapshot.address) != normalized
+                            {
+                                emit(AppEvent::Error(
+                                    "model confirmation requires the device to be connected"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                            transport.attest_model_known();
+                            snapshot.model_known = true;
+                            if !known_devices.contains(&normalized) {
+                                known_devices.push(normalized.clone());
+                            }
+                            emit(AppEvent::ModelConfirmed { address: normalized });
+                            emit(AppEvent::StateChanged(snapshot.clone()));
                         }
                         AppCommand::Disconnect => {
                             let _ = transport.disconnect();

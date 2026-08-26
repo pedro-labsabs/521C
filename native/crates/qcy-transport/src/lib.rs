@@ -83,4 +83,30 @@ pub trait Transport {
     /// resets when the transport is recreated). Without it, the central policy
     /// denies experimental writes.
     fn set_experimental_opt_in(&mut self, on: bool);
+    /// Explicit user attestation that the connected device's model is known
+    /// (e.g. a renamed HT08 whose advertised name no longer proves the model).
+    /// Lifts the read-only state for the current connection only; persistence of
+    /// the attestation is owned by the application layer. Must be a no-op when
+    /// not connected. Destructive opcodes stay forbidden regardless.
+    fn attest_model_known(&mut self);
+}
+
+/// Normalize a Bluetooth address for comparison/persistence: uppercase, `-` → `:`.
+pub fn normalize_address(address: &str) -> String {
+    address.trim().replace('-', ":").to_ascii_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_address;
+
+    #[test]
+    fn normalize_address_uppercases_and_unifies_separators() {
+        assert_eq!(normalize_address("84:ac:60:62:69:da"), "84:AC:60:62:69:DA");
+        assert_eq!(normalize_address("84-ac-60-62-69-da"), "84:AC:60:62:69:DA");
+        assert_eq!(
+            normalize_address("  84:AC:60:62:69:DA  "),
+            "84:AC:60:62:69:DA"
+        );
+    }
 }

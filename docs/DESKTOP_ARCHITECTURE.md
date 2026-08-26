@@ -49,6 +49,12 @@ Boundary rules:
   command if the flag is false.
 - Unknown/generic devices stay read-only: the core reports `model_known` from
   discovery evidence and the transport policy denies their writes.
+- Renamed devices can be unlocked interactively: when the advertised name does
+  not prove the model, the UI offers an explicit confirmation ("this is a
+  MeloBuds Pro (HT08)"). `AppCommand::ConfirmModel { address }` attests the
+  connected device only; the core emits `ModelConfirmed { address }` and the
+  desktop persists the address in the local-only config field `knownDevices`
+  (never exported). See `docs/SECURITY_MODEL.md`.
 - Host-only features (MPRIS, codec status, system EQ) are presented as Linux
   host behavior, never as earbud DSP/protocol capabilities (issue #13 contract).
 
@@ -56,14 +62,15 @@ Boundary rules:
 
 Defined in `native/crates/qcy-app/src/core.rs`:
 
-- **Commands (UI → core):** `Scan`, `Connect(address)`, `Disconnect`,
+- **Commands (UI → core):** `Scan`, `Connect(address)`,
+  `ConfirmModel { address }`, `Disconnect`,
   `RefreshStatus`, `SetNoise`, `SetAncScene`, `SetGameMode`, `SetSleepMode`,
   `SetInEarDetection`, `FindChime { .. }`, `SetExperimentalOptIn`,
   `MediaStatus`, `MediaControl`, `CodecStatus`, `SystemEqOn/Off/Status`,
   `Shutdown`.
 - **Events (core → UI):** `Discovered(list)`, `StateChanged(snapshot)`,
   `HostMedia`, `HostCodec`, `HostSystemEq`, `Error(message)`,
-  `Denied(message)`, `Info(message)`.
+  `Denied(message)`, `ModelConfirmed { address }`, `Info(message)`.
 
 The command enum deliberately cannot express destructive opcodes (`0x01`/`0x02`/
 `0x03`), arbitrary opcode writes, or un-preflighted chimes. If an IPC boundary
@@ -73,6 +80,13 @@ is ever added, these same types become the IPC schema unchanged.
 
 - Default: **BlueZ** over the system D-Bus GATT API (issue #7 transport),
   no root, no daemon reconfiguration.
+- Dual-mode earbuds: the buds usually pair as a BR/EDR audio device while the
+  QCY vendor protocol lives on a separate BLE/GATT identity. `scan` watches
+  discovery for a bounded window, and `connect` falls back to the BLE identity
+  (same advertised name, or the vendor main service in the device `UUIDs`)
+  when the selected object resolves no usable GATT. If nothing resolves, the
+  error tells the user to wake the BLE side (open the charging case or
+  disconnect audio) and retry.
 - `--mock`: deterministic mock transport, visibly labelled in the UI
   ("MOCK transport (development)" badge). Mock mode never pretends to be
   hardware.

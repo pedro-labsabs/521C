@@ -7,6 +7,7 @@
 //! when no Bluetooth daemon is available.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::policy::{WritePolicy, SERVICE_MAIN};
 use crate::{DiscoveredDevice, Transport, TransportError};
@@ -36,6 +37,9 @@ pub enum PropValue {
     I16(i16),
     Bool(bool),
     Bytes(Vec<u8>),
+    /// String arrays, e.g. the device `UUIDs` property (service UUIDs advertised
+    /// or resolved for the device).
+    StrArray(Vec<String>),
 }
 
 /// A BlueZ object: its path plus per-interface property maps.
@@ -50,6 +54,8 @@ pub struct BlueZObject {
 pub trait BlueZBus: Send {
     fn managed_objects(&self) -> Result<Vec<BlueZObject>, TransportError>;
     fn start_discovery(&self, adapter: &str) -> Result<(), TransportError>;
+    /// Stop discovery. Implementations must tolerate "not discovering" errors.
+    fn stop_discovery(&self, adapter: &str) -> Result<(), TransportError>;
     fn device_connect(&self, device_path: &str) -> Result<(), TransportError>;
     fn device_disconnect(&self, device_path: &str) -> Result<(), TransportError>;
     fn read_value(&self, char_path: &str) -> Result<Vec<u8>, TransportError>;
@@ -83,7 +89,21 @@ pub struct BlueZTransport {
     /// device's advertised name. Unknown models stay read-only: writes are denied
     /// even though the configured policy is the HT08 one.
     connected_model_known: bool,
+    /// Bounded discovery windows (injectable so tests run without real waits).
+    pub(crate) scan_window: Duration,
+    pub(crate) le_fallback_window: Duration,
 }
+
+/// How long `scan` watches for advertising devices before returning.
+const SCAN_WINDOW: Duration = Duration::from_secs(6);
+/// After the first candidate appears, wait this long for more before returning.
+const SCAN_GRACE: Duration = Duration::from_millis(1500);
+/// How long the dual-mode connect fallback searches for a BLE identity.
+const LE_FALLBACK_WINDOW: Duration = Duration::from_secs(10);
+/// Discovery poll interval. Bounded polling, not an open-ended loop: discovery
+/// results arrive asynchronously in BlueZ and the blocking D-Bus API has no
+/// signal-wait surface here.
+const DISCOVERY_POLL: Duration = Duration::from_millis(400);
 
 impl BlueZTransport {
     pub fn new(bus: Box<dyn BlueZBus>, policy: WritePolicy) -> Self {
@@ -95,6 +115,8 @@ impl BlueZTransport {
             device_path: None,
             chars: HashMap::new(),
             connected_model_known: false,
+            scan_window: SCAN_WINDOW,
+            le_fallback_window: LE_FALLBACK_WINDOW,
         }
     }
 
@@ -116,6 +138,50 @@ impl BlueZTransport {
 
     fn is_known_model(name: &str) -> bool {
         HT08_NAME_FRAGMENTS.iter().any(|f| name.contains(f))
+    }
+
+    /// The device's display name (BlueZ `Alias`, falling back to `Name`).
+    fn device_name_of(obj: &BlueZObject) -> Option<&str> {
+        Self::prop_str(obj, DEVICE_IFACE, "Alias")
+            .or_else(|| Self::prop_str(obj, DEVICE_IFACE, "Name"))
+    }
+
+    /// A device object as a scan candidate: QCY-ish name, address and RSSI.
+    fn candidate_device(obj: &BlueZObject) -> Option<DiscoveredDevice> {
+        if !obj.interfaces.contains_key(DEVICE_IFACE) {
+            return None;
+        }
+        let name = Self::device_name_of(obj)?;
+        if !Self::is_qcy_name(name) {
+            return None;
+        }
+        let address = Self::prop_str(obj, DEVICE_IFACE, "Address")?;
+        let rssi = match obj.interfaces.get(DEVICE_IFACE).and_then(|p| p.get("RSSI")) {
+            Some(PropValue::I16(v)) => Some(*v),
+            _ => None,
+        };
+        Some(DiscoveredDevice {
+            address: address.to_string(),
+            name: name.to_string(),
+            rssi,
+            model_known: Self::is_known_model(name),
+        })
+    }
+
+    /// True when the device object lists the vendor main service in its `UUIDs`
+    /// property (advertisement service list or resolved GATT) — strong evidence
+    /// that this identity speaks the QCY vendor protocol.
+    fn advertises_main_service(obj: &BlueZObject) -> bool {
+        match obj
+            .interfaces
+            .get(DEVICE_IFACE)
+            .and_then(|p| p.get("UUIDs"))
+        {
+            Some(PropValue::StrArray(uuids)) => {
+                uuids.iter().any(|u| u.eq_ignore_ascii_case(SERVICE_MAIN))
+            }
+            _ => false,
+        }
     }
 
     /// Resolve and cache the characteristics of the main service for the connected device.
@@ -179,45 +245,138 @@ impl BlueZTransport {
             .cloned()
             .ok_or_else(|| TransportError::NotFound(char_uuid.to_string()))
     }
+
+    /// Connect one specific device object and resolve the vendor characteristics.
+    /// Leaves the transport fully disconnected on any failure (no half state).
+    fn try_connect_path(&mut self, path: &str) -> Result<(), TransportError> {
+        self.bus.device_connect(path)?;
+        self.device_path = Some(path.to_string());
+        self.connected_model_known = self.device_model_known(path);
+        if let Err(e) = self.resolve_chars() {
+            self.device_path = None;
+            self.chars.clear();
+            self.connected_model_known = false;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Bounded discovery for a BLE identity carrying the vendor GATT service.
+    /// Candidates: same display name as the originally requested device, or the
+    /// vendor main service in their `UUIDs`. Strongest RSSI tried first. On
+    /// success the transport is connected through the found identity.
+    fn find_le_identity(&mut self, original_address: &str, original_name: Option<&str>) -> bool {
+        if self.bus.start_discovery(&self.adapter).is_err() {
+            return false;
+        }
+        let deadline = Instant::now() + self.le_fallback_window;
+        let mut tried: std::collections::HashSet<String> =
+            [original_address.to_string()].into_iter().collect();
+        let mut connected = false;
+        loop {
+            let mut candidates: Vec<(String, Option<i16>)> = Vec::new();
+            if let Ok(objects) = self.bus.managed_objects() {
+                for obj in &objects {
+                    if !obj.interfaces.contains_key(DEVICE_IFACE) {
+                        continue;
+                    }
+                    let Some(address) = Self::prop_str(obj, DEVICE_IFACE, "Address") else {
+                        continue;
+                    };
+                    if tried.contains(address) {
+                        continue;
+                    }
+                    let name_matches = match (original_name, Self::device_name_of(obj)) {
+                        (Some(orig), Some(name)) => {
+                            !orig.is_empty() && name.eq_ignore_ascii_case(orig)
+                        }
+                        _ => false,
+                    };
+                    if !name_matches && !Self::advertises_main_service(obj) {
+                        continue;
+                    }
+                    let rssi = match obj.interfaces.get(DEVICE_IFACE).and_then(|p| p.get("RSSI")) {
+                        Some(PropValue::I16(v)) => Some(*v),
+                        _ => None,
+                    };
+                    candidates.push((address.to_string(), rssi));
+                }
+            }
+            // Strongest signal first (None sorts last).
+            candidates.sort_by_key(|c| std::cmp::Reverse(c.1));
+            for (address, _) in candidates {
+                tried.insert(address.clone());
+                let path = device_path(&self.adapter, &address);
+                if self.try_connect_path(&path).is_ok() {
+                    connected = true;
+                    break;
+                }
+            }
+            if connected || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(DISCOVERY_POLL);
+        }
+        let _ = self.bus.stop_discovery(&self.adapter);
+        connected
+    }
 }
 
 impl Transport for BlueZTransport {
     fn scan(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
         self.bus.start_discovery(&self.adapter)?;
-        let objects = self.bus.managed_objects()?;
-        let mut out = Vec::new();
-        for obj in &objects {
-            if !obj.interfaces.contains_key(DEVICE_IFACE) {
-                continue;
+        // Bounded discovery: BlueZ reports devices asynchronously, so watch the
+        // object tree for a window instead of trusting a single instant snapshot.
+        let deadline = Instant::now() + self.scan_window;
+        let mut best: HashMap<String, DiscoveredDevice> = HashMap::new();
+        let mut first_seen: Option<Instant> = None;
+        loop {
+            for obj in self.bus.managed_objects()? {
+                if let Some(dev) = Self::candidate_device(&obj) {
+                    best.insert(dev.address.clone(), dev);
+                }
             }
-            let name = Self::prop_str(obj, DEVICE_IFACE, "Alias")
-                .or_else(|| Self::prop_str(obj, DEVICE_IFACE, "Name"))
-                .unwrap_or("");
-            if !Self::is_qcy_name(name) {
-                continue;
+            if !best.is_empty() && first_seen.is_none() {
+                first_seen = Some(Instant::now());
             }
-            let address = Self::prop_str(obj, DEVICE_IFACE, "Address").unwrap_or("");
-            let rssi = match obj.interfaces.get(DEVICE_IFACE).and_then(|p| p.get("RSSI")) {
-                Some(PropValue::I16(v)) => Some(*v),
-                _ => None,
-            };
-            out.push(DiscoveredDevice {
-                address: address.to_string(),
-                name: name.to_string(),
-                rssi,
-                model_known: Self::is_known_model(name),
-            });
+            let grace_done = first_seen.is_some_and(|t| t.elapsed() >= SCAN_GRACE);
+            if grace_done || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(DISCOVERY_POLL);
         }
+        self.bus.stop_discovery(&self.adapter)?;
+        let mut out: Vec<DiscoveredDevice> = best.into_values().collect();
+        out.sort_by(|a, b| a.address.cmp(&b.address));
         Ok(out)
     }
 
     fn connect(&mut self, address: &str) -> Result<(), TransportError> {
         let path = device_path(&self.adapter, address);
-        self.bus.device_connect(&path)?;
-        self.device_path = Some(path.clone());
-        self.connected_model_known = self.device_model_known(&path);
-        self.resolve_chars()?;
-        Ok(())
+        let primary = self.try_connect_path(&path);
+        if primary.is_ok() {
+            return Ok(());
+        }
+        // Dual-mode fallback: earbuds often pair as a BR/EDR audio device while
+        // the QCY vendor protocol lives on a separate BLE/GATT identity that has
+        // no GATT under this object. Search for that identity in a bounded
+        // discovery: a device with the same name as the requested one, or one
+        // advertising the vendor main service.
+        let original_name = self.bus.managed_objects().ok().and_then(|objects| {
+            objects
+                .iter()
+                .find(|o| o.path == path)
+                .and_then(|o| Self::device_name_of(o).map(|s| s.to_string()))
+        });
+        if self.find_le_identity(address, original_name.as_deref()) {
+            return Ok(());
+        }
+        match primary {
+            Err(TransportError::NotFound(what)) => Err(TransportError::NotFound(format!(
+                "{what} for {address}; if these earbuds are paired for audio only, their                  BLE identity may be asleep — open the charging case or disconnect the                  audio, then scan and connect again"
+            ))),
+            other => other,
+        }
     }
 
     fn disconnect(&mut self) -> Result<(), TransportError> {
@@ -268,6 +427,12 @@ impl Transport for BlueZTransport {
     fn set_experimental_opt_in(&mut self, on: bool) {
         self.experimental_opt_in = on;
     }
+
+    fn attest_model_known(&mut self) {
+        if self.device_path.is_some() {
+            self.connected_model_known = true;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,6 +467,11 @@ impl ZbusBlueZBus {
             TransportError::Timeout
         } else if msg.contains("NoSuchAdapter") {
             TransportError::AdapterOff
+        } else if msg.contains("page-timeout")
+            || msg.contains("connect-failed")
+            || msg.contains("le-connection-abort")
+        {
+            TransportError::DeviceOutOfRange
         } else if msg.contains("NotReady") || msg.contains("NotConnected") {
             TransportError::Disconnected
         } else {
@@ -324,7 +494,17 @@ impl ZbusBlueZBus {
                         _ => Err(()),
                     })
                     .collect();
-                bytes.ok().map(PropValue::Bytes)
+                if let Ok(bytes) = bytes {
+                    return Some(PropValue::Bytes(bytes));
+                }
+                let strings: Result<Vec<String>, ()> = a
+                    .iter()
+                    .map(|item| match item {
+                        Value::Str(s) => Ok(s.to_string()),
+                        _ => Err(()),
+                    })
+                    .collect();
+                strings.ok().map(PropValue::StrArray)
             }
             _ => None,
         }
@@ -372,12 +552,23 @@ impl BlueZBus for ZbusBlueZBus {
             .map_err(Self::map_dbus_err)
     }
 
+    fn stop_discovery(&self, adapter: &str) -> Result<(), TransportError> {
+        let proxy = self.proxy(&format!("/org/bluez/{adapter}"), "org.bluez.Adapter1")?;
+        // Best-effort cleanup: tolerate "not discovering" and vanishing adapters.
+        let _ = proxy.call_method("StopDiscovery", &());
+        Ok(())
+    }
+
     fn device_connect(&self, device_path: &str) -> Result<(), TransportError> {
         let proxy = self.proxy(device_path, "org.bluez.Device1")?;
-        proxy
-            .call_method("Connect", &())
-            .map(|_| ())
-            .map_err(Self::map_dbus_err)
+        match proxy.call_method("Connect", &()) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("AlreadyConnected") => {
+                // Already connected (e.g. BR/EDR audio): proceed to resolution.
+                Ok(())
+            }
+            Err(e) => Err(Self::map_dbus_err(e)),
+        }
     }
 
     fn device_disconnect(&self, device_path: &str) -> Result<(), TransportError> {
@@ -506,6 +697,9 @@ mod tests {
         fn start_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
             Ok(())
         }
+        fn stop_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
         fn device_connect(&self, _p: &str) -> Result<(), TransportError> {
             if self.fail_connect {
                 return Err(TransportError::DeviceOutOfRange);
@@ -550,10 +744,11 @@ mod tests {
             writes: writes.clone(),
             ..Default::default()
         };
-        (
-            BlueZTransport::new(Box::new(bus), WritePolicy::ht08()),
-            writes,
-        )
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        // Zero discovery windows: tests take instant snapshots, no real waits.
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+        (t, writes)
     }
 
     #[test]
@@ -681,6 +876,20 @@ mod tests {
     }
 
     #[test]
+    fn user_attestation_lifts_read_only_but_never_allows_destructive() {
+        let (mut t, writes) = transport(unknown_qcy_fixture());
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        t.attest_model_known();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        t.write(&frame).unwrap();
+        assert_eq!(writes.lock().expect("writes mutex").len(), 1);
+        // Destructive opcodes stay forbidden even after attestation.
+        let reset = encode_command(0x01, &[]).unwrap();
+        assert!(matches!(t.write(&reset), Err(TransportError::Denied(_))));
+        assert_eq!(writes.lock().expect("writes mutex").len(), 1);
+    }
+
+    #[test]
     fn disconnect_clears_model_evidence() {
         let (mut t, writes) = transport(ht08_fixture());
         t.connect("F8:5C:7D:12:08:08").unwrap();
@@ -703,9 +912,147 @@ mod tests {
             ..Default::default()
         };
         let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
         assert_eq!(
             t.connect("F8:5C:7D:12:08:08"),
             Err(TransportError::DeviceOutOfRange)
         );
+    }
+
+    /// Dual-mode fixture: the BR/EDR identity (audio pairing, no GATT children)
+    /// plus the BLE identity (same renamed name, vendor GATT service).
+    fn dual_mode_fixture() -> Vec<BlueZObject> {
+        let mut objects = Vec::new();
+        let bredr = "/org/bluez/hci0/dev_84_AC_60_62_69_DA";
+        objects.push(obj(
+            bredr,
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("84:AC:60:62:69:DA".into())),
+                ("Alias", PropValue::Str("MeloBuds de Carol".into())),
+            ],
+        ));
+        let le = "/org/bluez/hci0/dev_C4_AC_60_62_69_DB";
+        let svc = format!("{le}/service0001");
+        let char_cmd = format!("{svc}/char0001");
+        let char_batt = format!("{svc}/char0002");
+        objects.push(obj(
+            le,
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("C4:AC:60:62:69:DB".into())),
+                ("Alias", PropValue::Str("MeloBuds de Carol".into())),
+                ("RSSI", PropValue::I16(-60)),
+            ],
+        ));
+        objects.push(obj(
+            &svc,
+            SERVICE_IFACE,
+            vec![("UUID", PropValue::Str(SERVICE_MAIN.into()))],
+        ));
+        objects.push(obj(
+            &char_cmd,
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        objects.push(obj(
+            &char_batt,
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str("00000008-0000-1000-8000-00805f9b34fb".into()),
+            )],
+        ));
+        objects
+    }
+
+    #[test]
+    fn connect_falls_back_to_the_ble_identity_of_a_dual_mode_device() {
+        let (mut t, writes) = transport(dual_mode_fixture());
+        // The user picks the BR/EDR address (the paired audio device); the
+        // transport must bridge to the BLE identity that carries the GATT.
+        t.connect("84:AC:60:62:69:DA").unwrap();
+        // Renamed device: model still unproven, so writes stay denied...
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert!(matches!(
+            t.write(&frame),
+            Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice
+            ))
+        ));
+        // ...until the user attests the model; then writes target the BLE char.
+        t.attest_model_known();
+        t.write(&frame).unwrap();
+        let w = writes.lock().expect("writes mutex");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].0.contains("dev_C4_AC_60_62_69_DB"));
+        // Status reads work through the BLE identity too.
+        assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn connect_fallback_accepts_a_vendor_service_advertisement() {
+        // The BLE identity has a different name but advertises the vendor main
+        // service in its UUIDs — accepted as a fallback candidate.
+        let mut objects = Vec::new();
+        objects.push(obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("84:AC:60:62:69:DA".into())),
+                ("Alias", PropValue::Str("MeloBuds de Carol".into())),
+            ],
+        ));
+        let le = "/org/bluez/hci0/dev_C4_AC_60_62_69_DB";
+        let svc = format!("{le}/service0001");
+        objects.push(obj(
+            le,
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("C4:AC:60:62:69:DB".into())),
+                ("Alias", PropValue::Str("QCY-Buds".into())),
+                ("UUIDs", PropValue::StrArray(vec![SERVICE_MAIN.to_string()])),
+            ],
+        ));
+        objects.push(obj(
+            &svc,
+            SERVICE_IFACE,
+            vec![("UUID", PropValue::Str(SERVICE_MAIN.into()))],
+        ));
+        objects.push(obj(
+            &format!("{svc}/char0001"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        let (mut t, _writes) = transport(objects);
+        t.connect("84:AC:60:62:69:DA").unwrap();
+    }
+
+    #[test]
+    fn connect_without_gatt_or_candidates_reports_actionable_error() {
+        // Only the BR/EDR object exists and nothing else qualifies as a BLE
+        // identity: the error must tell the user how to wake the BLE side.
+        let objects = vec![obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("84:AC:60:62:69:DA".into())),
+                ("Alias", PropValue::Str("MeloBuds de Carol".into())),
+            ],
+        )];
+        let (mut t, _writes) = transport(objects);
+        match t.connect("84:AC:60:62:69:DA") {
+            Err(TransportError::NotFound(msg)) => {
+                assert!(msg.contains("charging case"), "message was: {msg}");
+            }
+            other => panic!("expected actionable NotFound, got {other:?}"),
+        }
     }
 }

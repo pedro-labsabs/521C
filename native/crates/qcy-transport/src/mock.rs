@@ -129,6 +129,12 @@ impl Transport for MockTransport {
     fn set_experimental_opt_in(&mut self, on: bool) {
         self.experimental_opt_in = on;
     }
+
+    fn attest_model_known(&mut self) {
+        if self.connected {
+            self.connected_model_known = true;
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -188,6 +194,43 @@ mod tests {
         assert!(t.tx_log.is_empty());
         // Read-only still permits status reads.
         assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn user_attestation_lifts_read_only_for_the_connection() {
+        let mut t = MockTransport::new(WritePolicy::ht08());
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        t.attest_model_known();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        t.write(&frame).unwrap();
+        assert_eq!(t.tx_log.len(), 1);
+        // Destructive opcodes stay forbidden even after attestation.
+        let reset = encode_command(0x01, &[]).unwrap();
+        assert!(matches!(t.write(&reset), Err(TransportError::Denied(_))));
+    }
+
+    #[test]
+    fn attestation_is_cleared_by_disconnect_and_ignored_when_not_connected() {
+        let mut t = MockTransport::new(WritePolicy::ht08());
+        t.attest_model_known(); // no-op without a connection
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
+        assert!(matches!(
+            t.write(&frame),
+            Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice
+            ))
+        ));
+        t.attest_model_known();
+        t.write(&frame).unwrap();
+        t.disconnect().unwrap();
+        t.connect("AA:BB:CC:DD:EE:FF").unwrap();
+        assert!(matches!(
+            t.write(&frame),
+            Err(TransportError::Denied(
+                crate::policy::Denial::ReadOnlyDevice
+            ))
+        ));
     }
 
     #[test]

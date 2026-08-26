@@ -11,7 +11,7 @@
 //!  1. portable   — backup/export files and local persistence (theme, notify, custom
 //!     EQ, custom profiles, active profile, auto game-mode trigger);
 //!  2. local-only — persisted on this machine, never exported (`hideMac`,
-//!     `sleepTimerMin`, `lastSeen`);
+//!     `sleepTimerMin`, `lastSeen`, `knownDevices`);
 //!  3. runtime    — session state, never persisted (connection state, opt-ins, logs).
 //!
 //! External data is never trusted: it is validated field-by-field before it can touch
@@ -38,6 +38,8 @@ pub mod limits {
     pub const TRANSPARENCY_LEVEL_MAX: i64 = 7;
     pub const SLEEP_TIMER_MIN: i64 = 5;
     pub const SLEEP_TIMER_MAX: i64 = 240;
+    pub const MAX_KNOWN_DEVICES: usize = 16;
+    pub const MAX_ADDRESS_LEN: usize = 32;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +151,9 @@ pub struct PersistedConfig {
     pub hide_mac: bool,
     pub sleep_timer_min: i64,
     pub last_seen: Option<LastSeen>,
+    /// Addresses whose model the user explicitly confirmed (local-only, never
+    /// exported: Bluetooth addresses are privacy-sensitive identifiers).
+    pub known_devices: Vec<String>,
 }
 
 pub fn default_notify() -> NotifyPrefs {
@@ -181,6 +186,7 @@ pub fn default_persisted() -> PersistedConfig {
         hide_mac: true,
         sleep_timer_min: 30,
         last_seen: None,
+        known_devices: Vec::new(),
     }
 }
 
@@ -726,6 +732,60 @@ fn validate_last_seen(
     Some(Some(LastSeen { at, host, rssi }))
 }
 
+/// Validate the local-only `knownDevices` list (addresses whose model the user
+/// explicitly confirmed). Missing/null means an empty list; anything malformed
+/// rejects the whole payload atomically.
+fn validate_known_devices(
+    v: &mut Validator,
+    value: Option<&serde_json::Value>,
+) -> Option<Vec<String>> {
+    let Some(value) = value else {
+        return Some(Vec::new());
+    };
+    if value.is_null() {
+        return Some(Vec::new());
+    }
+    let Some(items) = value.as_array() else {
+        v.fail("knownDevices", "expected an array of addresses");
+        return None;
+    };
+    if items.len() > limits::MAX_KNOWN_DEVICES {
+        v.fail(
+            "knownDevices",
+            format!("more than {} addresses", limits::MAX_KNOWN_DEVICES),
+        );
+        return None;
+    }
+    let mut out = Vec::with_capacity(items.len());
+    let mut ok = true;
+    for (i, item) in items.iter().enumerate() {
+        let Some(s) = item.as_str() else {
+            v.fail(&format!("knownDevices[{i}]"), "expected a string");
+            ok = false;
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            v.fail(&format!("knownDevices[{i}]"), "must not be empty");
+            ok = false;
+            continue;
+        }
+        if trimmed.len() > limits::MAX_ADDRESS_LEN {
+            v.fail(
+                &format!("knownDevices[{i}]"),
+                format!("longer than {} characters", limits::MAX_ADDRESS_LEN),
+            );
+            ok = false;
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    if !ok {
+        return None;
+    }
+    Some(out)
+}
+
 /* ------------------------------------------------------------------ */
 /* Whole-object parsing                                                */
 /* ------------------------------------------------------------------ */
@@ -880,6 +940,13 @@ pub fn parse_persisted_config(raw: &serde_json::Value) -> ParseResult<PersistedC
             None
         }
     };
+    let known_devices = match validate_known_devices(&mut v, map.get("knownDevices")) {
+        Some(k) => k,
+        None => {
+            ok = false;
+            Vec::new()
+        }
+    };
     if !ok {
         return Err(v.errors);
     }
@@ -888,6 +955,7 @@ pub fn parse_persisted_config(raw: &serde_json::Value) -> ParseResult<PersistedC
         hide_mac,
         sleep_timer_min,
         last_seen,
+        known_devices,
     })
 }
 

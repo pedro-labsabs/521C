@@ -13,10 +13,14 @@ struct VectorFile {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ValidVector {
     name: String,
     json: Value,
     expect: ValidExpect,
+    /// Stored-only vectors exercise the persisted (local-only) schema path.
+    #[serde(default)]
+    stored_only: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -31,6 +35,8 @@ struct ValidExpect {
     notify_connected: bool,
     #[serde(default)]
     imported_profile_builtin: Option<bool>,
+    #[serde(default)]
+    known_devices_count: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -57,8 +63,26 @@ fn vectors() -> VectorFile {
 #[test]
 fn valid_vectors_parse_with_expected_values() {
     for vector in vectors().valid {
-        let parsed = parse_external_config(&vector.json)
-            .unwrap_or_else(|errors| panic!("{}: expected success, got {errors:?}", vector.name));
+        let stored_only = vector.stored_only.unwrap_or(false);
+        let (parsed, known_devices): (ExternalConfig, Vec<String>) = if stored_only {
+            let full = parse_any_stored_config(&vector.json).unwrap_or_else(|errors| {
+                panic!("{}: expected success, got {errors:?}", vector.name)
+            });
+            (full.external, full.known_devices)
+        } else {
+            let external = parse_external_config(&vector.json).unwrap_or_else(|errors| {
+                panic!("{}: expected success, got {errors:?}", vector.name)
+            });
+            (external, Vec::new())
+        };
+        if let Some(count) = vector.expect.known_devices_count {
+            assert_eq!(
+                known_devices.len(),
+                count,
+                "{}: knownDevices count",
+                vector.name
+            );
+        }
         let theme = match parsed.theme {
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",

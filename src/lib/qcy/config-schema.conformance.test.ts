@@ -23,9 +23,16 @@ type ValidExpect = {
   customProfilesCount: number;
   notifyConnected: boolean;
   importedProfileBuiltin?: boolean;
+  knownDevicesCount?: number;
 };
 
-type ValidVector = { name: string; json: unknown; expect: ValidExpect };
+type ValidVector = {
+  name: string;
+  json: unknown;
+  expect: ValidExpect;
+  /** Stored-only vectors exercise the persisted (local-only) schema path. */
+  storedOnly?: boolean;
+};
 type InvalidVector = {
   name: string;
   json: unknown;
@@ -54,13 +61,15 @@ function errorsOf(result: { ok: boolean; errors?: ConfigError[] }): ConfigError[
 describe("shared config vectors", () => {
   it("pins the vector corpus version", () => {
     expect(vectors.version).toBe(1);
-    expect(vectors.valid.length).toBeGreaterThanOrEqual(3);
-    expect(vectors.invalid.length).toBeGreaterThanOrEqual(6);
+    expect(vectors.valid.length).toBeGreaterThanOrEqual(5);
+    expect(vectors.invalid.length).toBeGreaterThanOrEqual(11);
   });
 
   for (const vector of vectors.valid) {
     it(`accepts: ${vector.name}`, () => {
-      const result = parseExternalConfig(vector.json);
+      const result = vector.storedOnly
+        ? parseAnyStoredConfig(vector.json)
+        : parseExternalConfig(vector.json);
       expect(result.ok, JSON.stringify(errorsOf(result))).toBe(true);
       if (!result.ok) return;
       const config = result.value;
@@ -75,6 +84,11 @@ describe("shared config vectors", () => {
         expect(config.customProfiles[0]?.builtin).toBe(
           vector.expect.importedProfileBuiltin,
         );
+      }
+      if (vector.expect.knownDevicesCount !== undefined) {
+        expect(
+          "knownDevices" in config ? config.knownDevices : [],
+        ).toHaveLength(vector.expect.knownDevicesCount);
       }
     });
   }

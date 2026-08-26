@@ -65,6 +65,7 @@ export component MainWindow inherits Window {
     callback connect-clicked(int);
     callback disconnect-clicked();
     callback refresh-clicked();
+    callback confirm-model-clicked();
     callback noise-changed(int);
     callback game-mode-changed(bool);
     callback sleep-mode-changed(bool);
@@ -155,8 +156,24 @@ export component MainWindow inherits Window {
 
                     GroupBox {
                         title: "Status";
-                        HorizontalBox {
-                            spacing: 16px;
+                        VerticalBox {
+                            spacing: 8px;
+                            HorizontalBox {
+                                spacing: 4px;
+                                visible: AppState.connected && !AppState.model-known;
+                                Text {
+                                    text: "Model not proven — controls stay read-only. If this is a QCY MeloBuds Pro (HT08), confirm it to enable controls. Stored on this machine only.";
+                                    wrap: word-wrap;
+                                    color: #b45309;
+                                    horizontal-alignment: left;
+                                }
+                                Button {
+                                    text: "Confirm: MeloBuds Pro (HT08)";
+                                    clicked => { root.confirm-model-clicked(); }
+                                }
+                            }
+                            HorizontalBox {
+                                spacing: 16px;
                             VerticalBox {
                                 spacing: 2px;
                                 Text { text: "Device: " + AppState.device-name; }
@@ -197,6 +214,7 @@ export component MainWindow inherits Window {
                                         text: AppState.battery-case + "%" + (AppState.charging-case ? " ⚡" : "");
                                     }
                                 }
+                            }
                             }
                         }
                     }

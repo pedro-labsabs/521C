@@ -7,7 +7,8 @@
  *     between machines: theme, notifications, custom EQ, custom profiles, active
  *     profile, auto game-mode trigger.
  *  2. LOCAL_ONLY            — persisted on this machine but never exported, because it
- *     is host-specific or privacy-sensitive: `hideMac`, `sleepTimerMin`, `lastSeen`.
+ *     is host-specific or privacy-sensitive: `hideMac`, `sleepTimerMin`, `lastSeen`,
+ *     `knownDevices`.
  *  3. RUNTIME_ONLY          — session/live state, never persisted: connection state,
  *     telemetry, log, toasts, experimental write opt-in, pending chime, etc.
  *
@@ -61,6 +62,11 @@ export type PersistedConfig = ExternalConfig & {
   hideMac: boolean;
   sleepTimerMin: number;
   lastSeen: LastSeen;
+  /**
+   * Addresses whose model the user explicitly confirmed (e.g. a renamed HT08).
+   * Local-only: Bluetooth addresses are privacy-sensitive and never exported.
+   */
+  knownDevices: string[];
 };
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +89,8 @@ export const LIMITS = {
   transparencyLevelMax: 7,
   sleepTimerMin: 5,
   sleepTimerMax: 240,
+  maxKnownDevices: 16,
+  maxAddressLen: 32,
 } as const;
 
 export const DEFAULT_CONFIG: Omit<PersistedConfig, "schema"> = {
@@ -103,6 +111,7 @@ export const DEFAULT_CONFIG: Omit<PersistedConfig, "schema"> = {
   hideMac: true,
   sleepTimerMin: 30,
   lastSeen: null,
+  knownDevices: [],
 };
 
 /* ------------------------------------------------------------------ */
@@ -372,6 +381,45 @@ function validateLastSeen(v: Validator, path: string, raw: unknown): LastSeen | 
   return { at, host, rssi };
 }
 
+/**
+ * Validate the local-only `knownDevices` list (addresses whose model the user
+ * explicitly confirmed). Missing/null means an empty list; anything malformed
+ * rejects the whole payload atomically.
+ */
+function validateKnownDevices(v: Validator, raw: unknown): string[] | undefined {
+  if (raw === null || raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    v.fail("knownDevices", "expected an array of addresses");
+    return undefined;
+  }
+  if (raw.length > LIMITS.maxKnownDevices) {
+    v.fail("knownDevices", `more than ${LIMITS.maxKnownDevices} addresses`);
+    return undefined;
+  }
+  const out: string[] = [];
+  let ok = true;
+  raw.forEach((item, i) => {
+    if (typeof item !== "string") {
+      v.fail(`knownDevices[${i}]`, "expected a string");
+      ok = false;
+      return;
+    }
+    const trimmed = item.trim();
+    if (trimmed.length === 0) {
+      v.fail(`knownDevices[${i}]`, "must not be empty");
+      ok = false;
+      return;
+    }
+    if (trimmed.length > LIMITS.maxAddressLen) {
+      v.fail(`knownDevices[${i}]`, `longer than ${LIMITS.maxAddressLen} characters`);
+      ok = false;
+      return;
+    }
+    out.push(trimmed);
+  });
+  return ok ? out : undefined;
+}
+
 /* ------------------------------------------------------------------ */
 /* Whole-object parsing                                                */
 /* ------------------------------------------------------------------ */
@@ -452,10 +500,16 @@ export function parsePersistedConfig(raw: unknown): ParseResult<PersistedConfig>
     DEFAULT_CONFIG.sleepTimerMin,
   );
   const lastSeen = validateLastSeen(v, "lastSeen", record.lastSeen);
-  if (hideMac === undefined || sleepTimerMin === undefined || lastSeen === undefined) {
+  const knownDevices = validateKnownDevices(v, record.knownDevices);
+  if (
+    hideMac === undefined ||
+    sleepTimerMin === undefined ||
+    lastSeen === undefined ||
+    knownDevices === undefined
+  ) {
     return { ok: false, errors: v.errors };
   }
-  return v.result({ ...external.value, hideMac, sleepTimerMin, lastSeen });
+  return v.result({ ...external.value, hideMac, sleepTimerMin, lastSeen, knownDevices });
 }
 
 /* ------------------------------------------------------------------ */
