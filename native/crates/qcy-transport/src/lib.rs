@@ -68,6 +68,15 @@ pub trait Transport {
     /// Discover candidate QCY devices. Preserves unknown-device status when the model
     /// is not proven.
     fn scan(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError>;
+    /// Devices that are already connected at the host level (e.g. earbuds the
+    /// user connected for audio before opening the application), so the app can
+    /// attach to them without a user-initiated scan. Model truth is preserved:
+    /// a listed device is writable only when its model is proven or previously
+    /// confirmed. Default: none (mock/fake transports have no host connection
+    /// state); transports with real host state override this.
+    fn connected_devices(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
+        Ok(Vec::new())
+    }
     /// Connect to the device with the given address and resolve required characteristics.
     fn connect(&mut self, address: &str) -> Result<(), TransportError>;
     fn disconnect(&mut self) -> Result<(), TransportError>;

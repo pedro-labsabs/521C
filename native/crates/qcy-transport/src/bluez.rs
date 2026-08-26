@@ -258,10 +258,43 @@ impl BlueZTransport {
         }
     }
 
+    /// True when the device object already reports `Connected = true` (any link —
+    /// e.g. the earbuds are connected for BR/EDR audio). A redundant
+    /// `Device1.Connect()` on such an object fails with `br-connection-busy`,
+    /// so the connect step is skipped and resolution proceeds directly.
+    fn device_already_connected(&self, path: &str) -> bool {
+        self.bus
+            .managed_objects()
+            .ok()
+            .map(|objects| {
+                objects.iter().any(|o| {
+                    o.path == path
+                        && matches!(
+                            o.interfaces
+                                .get(DEVICE_IFACE)
+                                .and_then(|p| p.get("Connected")),
+                            Some(PropValue::Bool(true))
+                        )
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Connect one specific device object and resolve the vendor characteristics.
     /// Leaves the transport fully disconnected on any failure (no half state).
     fn try_connect_path(&mut self, path: &str) -> Result<(), TransportError> {
-        self.bus.device_connect(path)?;
+        if !self.device_already_connected(path) {
+            match self.bus.device_connect(path) {
+                Ok(()) => {}
+                // The link is already up or BlueZ is already handling it (a
+                // concurrent/previous connect answers `br-connection-busy` or
+                // `AlreadyConnected`). Proceed to characteristic resolution;
+                // resolution and the dual-mode fallback decide the outcome.
+                Err(TransportError::Bus(msg))
+                    if msg.contains("br-connection-busy") || msg.contains("AlreadyConnected") => {}
+                Err(e) => return Err(e),
+            }
+        }
         self.device_path = Some(path.to_string());
         self.connected_model_known = self.device_model_known(path);
         if let Err(e) = self.resolve_chars() {
@@ -359,6 +392,45 @@ impl Transport for BlueZTransport {
         }
         self.bus.stop_discovery(&self.adapter)?;
         let mut out: Vec<DiscoveredDevice> = best.into_values().collect();
+        out.sort_by(|a, b| a.address.cmp(&b.address));
+        Ok(out)
+    }
+
+    fn connected_devices(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
+        // No discovery needed: devices the host is already connected to are
+        // present in the BlueZ object tree with `Connected = true` (they may
+        // not be advertising, so a scan window can miss them).
+        let mut out: Vec<DiscoveredDevice> = Vec::new();
+        for obj in self.bus.managed_objects()? {
+            if !matches!(
+                obj.interfaces
+                    .get(DEVICE_IFACE)
+                    .and_then(|p| p.get("Connected")),
+                Some(PropValue::Bool(true))
+            ) {
+                continue;
+            }
+            if let Some(dev) = Self::candidate_device(&obj) {
+                out.push(dev);
+                continue;
+            }
+            // Renamed device: no QCY-ish name, but the vendor main service in
+            // the object's `UUIDs` is strong evidence it speaks the QCY vendor
+            // protocol. The model stays unproven (read-only until confirmed).
+            if Self::advertises_main_service(&obj) {
+                let Some(address) = Self::prop_str(&obj, DEVICE_IFACE, "Address") else {
+                    continue;
+                };
+                out.push(DiscoveredDevice {
+                    address: address.to_string(),
+                    name: Self::device_name_of(&obj)
+                        .unwrap_or("QCY device")
+                        .to_string(),
+                    rssi: None,
+                    model_known: false,
+                });
+            }
+        }
         out.sort_by(|a, b| a.address.cmp(&b.address));
         Ok(out)
     }
@@ -589,14 +661,10 @@ impl BlueZBus for ZbusBlueZBus {
 
     fn device_connect(&self, device_path: &str) -> Result<(), TransportError> {
         let proxy = self.proxy(device_path, "org.bluez.Device1")?;
-        match proxy.call_method("Connect", &()) {
-            Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("AlreadyConnected") => {
-                // Already connected (e.g. BR/EDR audio): proceed to resolution.
-                Ok(())
-            }
-            Err(e) => Err(Self::map_dbus_err(e)),
-        }
+        proxy
+            .call_method("Connect", &())
+            .map(|_| ())
+            .map_err(Self::map_dbus_err)
     }
 
     fn device_disconnect(&self, device_path: &str) -> Result<(), TransportError> {
@@ -666,6 +734,13 @@ mod tests {
         fail_connect: bool,
         /// Device object paths for which `Device1.Connect` fails.
         fail_connect_paths: RefCell<Vec<String>>,
+        /// Device object paths for which `Device1.Connect` answers
+        /// `org.bluez.Error.Failed: br-connection-busy` (BlueZ's answer when
+        /// the link is already up/busy, e.g. audio already connected).
+        busy_connect_paths: Vec<String>,
+        /// Every path passed to `Device1.Connect`, in call order (shared so
+        /// tests can assert on it after the bus is moved into the transport).
+        connect_calls: Arc<Mutex<Vec<String>>>,
     }
 
     fn obj(path: &str, iface: &str, props: Vec<(&str, PropValue)>) -> BlueZObject {
@@ -731,8 +806,17 @@ mod tests {
             Ok(())
         }
         fn device_connect(&self, p: &str) -> Result<(), TransportError> {
+            self.connect_calls
+                .lock()
+                .expect("connect_calls mutex")
+                .push(p.to_string());
             if self.fail_connect || self.fail_connect_paths.borrow().iter().any(|x| x == p) {
                 return Err(TransportError::DeviceOutOfRange);
+            }
+            if self.busy_connect_paths.iter().any(|x| x == p) {
+                return Err(TransportError::Bus(
+                    "org.bluez.Error.Failed: br-connection-busy".into(),
+                ));
             }
             *self.connected.borrow_mut() = true;
             Ok(())
@@ -779,6 +863,24 @@ mod tests {
         t.scan_window = Duration::ZERO;
         t.le_fallback_window = Duration::ZERO;
         (t, writes)
+    }
+
+    /// Like [`transport`], but keeping a handle to the recorded `Connect` calls.
+    fn transport_with_calls(
+        objects: Vec<BlueZObject>,
+    ) -> (BlueZTransport, WriteLog, Arc<Mutex<Vec<String>>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let bus = FakeBus {
+            objects,
+            writes: writes.clone(),
+            connect_calls: calls.clone(),
+            ..Default::default()
+        };
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+        (t, writes, calls)
     }
 
     #[test]
@@ -1215,5 +1317,124 @@ mod tests {
             }
             other => panic!("expected actionable NotFound, got {other:?}"),
         }
+    }
+
+    /* Already-connected attach (user report: `br-connection-busy`) */
+
+    fn ht08_fixture_connected() -> Vec<BlueZObject> {
+        // The standard HT08 fixture, but the device object reports an existing
+        // host connection (e.g. the earbuds are connected for BR/EDR audio).
+        let mut objects = ht08_fixture();
+        let dev = objects
+            .iter_mut()
+            .find(|o| o.interfaces.contains_key(DEVICE_IFACE) && !o.path.contains("service"))
+            .expect("device object");
+        dev.interfaces
+            .get_mut(DEVICE_IFACE)
+            .unwrap()
+            .insert("Connected".to_string(), PropValue::Bool(true));
+        objects
+    }
+
+    #[test]
+    fn connect_skips_redundant_connect_for_an_already_connected_device() {
+        // The earbuds are already connected at the host level; `Connect()` must
+        // not be issued again (BlueZ would answer br-connection-busy), and the
+        // characteristics still resolve.
+        let (mut t, _writes, calls) = transport_with_calls(ht08_fixture_connected());
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no Connect call expected for an already-connected device"
+        );
+        // The session is usable.
+        assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn connect_tolerates_br_connection_busy_when_the_link_is_already_up() {
+        // Race variant: the object is not marked Connected when checked, but
+        // BlueZ still answers br-connection-busy to Connect. The transport
+        // proceeds to resolution instead of failing.
+        let dev_path = device_path("hci0", "F8:5C:7D:12:08:08");
+        let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let bus = FakeBus {
+            objects: ht08_fixture(),
+            writes: writes.clone(),
+            busy_connect_paths: vec![dev_path.clone()],
+            connect_calls: calls.clone(),
+            ..Default::default()
+        };
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![dev_path]);
+        assert!(t.read("00000008-0000-1000-8000-00805f9b34fb").is_ok());
+    }
+
+    #[test]
+    fn connected_devices_lists_only_connected_qcy_candidates() {
+        let connected_qcy = obj(
+            "/org/bluez/hci0/dev_F8_5C_7D_12_08_08",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("F8:5C:7D:12:08:08".into())),
+                ("Alias", PropValue::Str("QCY MeloBuds Pro".into())),
+                ("Connected", PropValue::Bool(true)),
+            ],
+        );
+        // Renamed device, connected, exposing the vendor main service: listed,
+        // but the model stays unproven.
+        let connected_renamed = obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("84:AC:60:62:69:DA".into())),
+                ("Alias", PropValue::Str("Fones da Carol".into())),
+                ("Connected", PropValue::Bool(true)),
+                ("UUIDs", PropValue::StrArray(vec![SERVICE_MAIN.to_string()])),
+            ],
+        );
+        // Connected but not QCY-ish: not listed.
+        let connected_other = obj(
+            "/org/bluez/hci0/dev_11_22_33_44_55_66",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("11:22:33:44:55:66".into())),
+                ("Alias", PropValue::Str("Generic Speaker".into())),
+                ("Connected", PropValue::Bool(true)),
+            ],
+        );
+        // QCY-ish but not connected: not listed (a scan would find it).
+        let disconnected_qcy = obj(
+            "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("AA:BB:CC:DD:EE:FF".into())),
+                ("Alias", PropValue::Str("QCY MeloBuds Pro".into())),
+                ("Connected", PropValue::Bool(false)),
+            ],
+        );
+        let (mut t, _writes) = transport(vec![
+            connected_qcy,
+            connected_renamed,
+            connected_other,
+            disconnected_qcy,
+        ]);
+        let list = t.connected_devices().unwrap();
+        let addrs: Vec<&str> = list.iter().map(|d| d.address.as_str()).collect();
+        assert_eq!(addrs, vec!["84:AC:60:62:69:DA", "F8:5C:7D:12:08:08"]);
+        let renamed = &list[0];
+        assert!(!renamed.model_known, "renamed device stays unproven");
+        let named = &list[1];
+        assert!(named.model_known, "HT08 name proves the model");
+    }
+
+    #[test]
+    fn connected_devices_is_empty_without_connected_devices() {
+        let (mut t, _writes) = transport(ht08_fixture());
+        assert!(t.connected_devices().unwrap().is_empty());
     }
 }
