@@ -74,21 +74,25 @@ Merge rules:
 
 ### Release gate enforcement (issue #41)
 
-The intended gate is: `Web · Node 22`, `Native · Rust stable` and
+The enforced gate is: `Web · Node 22`, `Native · Rust stable` and
 `Desktop · AppImage artifact` required on `main` before merge/tag.
 
-Current plan limitation (audited 2026-08-26): the repository is **private**
-in a **Free-plan** organization, so
+**Current state (restored 2026-08-26):** the repository is **public**, so the
+Free-plan organization has GitHub-hosted runners and branch protection. The
+three check contexts are required on `main` (strict/up-to-date, enforced for
+administrators, no direct pushes — every change goes through a pull request
+with green checks). A fully green remote run on `main`
+(run `32971542451`, commit `98c7d60`) evidences the restored gate.
 
-- GitHub-hosted runners require available Actions minutes / a spending limit;
-  when the monthly quota is exhausted jobs fail before any step runs
-  (annotation: "recent account payments have failed or your spending limit
-  needs to be increased");
-- branch protection with required status checks is not available for private
-  repositories on the Free plan (API returns HTTP 403 "Upgrade to GitHub Pro
-  or make this repository public").
-
-Until the plan limitation is resolved, the enforced workaround is:
+Historical limitation and contingency: while the repository was **private**
+in the Free-plan organization (audited 2026-08-26), GitHub-hosted runners
+required available Actions minutes (when the monthly quota is exhausted, jobs
+fail before any step runs with the annotation "recent account payments have
+failed or your spending limit needs to be increased"), and branch protection
+with required status checks was unavailable for private repositories on the
+Free plan (API HTTP 403 "Upgrade to GitHub Pro or make this repository
+public"). If the repository ever becomes private again on a Free plan, the
+enforced workaround below applies:
 
 1. every PR runs the full local validation ladder from a clean checkout and
    posts the exact commands and results in the PR (see §3);
