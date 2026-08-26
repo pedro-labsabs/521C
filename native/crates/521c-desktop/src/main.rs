@@ -230,6 +230,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mock = args.iter().any(|a| a == "--mock") || cfg!(not(feature = "bluez"));
     let self_test = args.iter().any(|a| a == "--self-test");
+    let close_self_test = args.iter().any(|a| a == "--close-self-test");
 
     // XDG config: load before the UI so persisted preferences apply at startup.
     let mut storage = XdgStorage::default_path()
@@ -604,13 +605,62 @@ fn main() {
     let config_for_exit = Arc::clone(&shared_config);
     app.window().on_close_requested(move || {
         // Persist the full local config (portable + local-only) on clean exit.
-        let cfg = config_for_exit.lock().expect("config mutex");
-        let mut storage = XdgStorage::default_path()
-            .map(XdgStorage::new)
-            .expect("XDG config path resolvable");
-        config::save_persisted_config(&mut storage, &cfg);
+        {
+            let cfg = config_for_exit.lock().expect("config mutex");
+            let mut storage = XdgStorage::default_path()
+                .map(XdgStorage::new)
+                .expect("XDG config path resolvable");
+            config::save_persisted_config(&mut storage, &cfg);
+        }
+        // v1 is a normal windowed app with no tray/background mode (see
+        // DESKTOP_ARCHITECTURE.md §6): a normal close must end the event loop
+        // so the process exits and the core worker shuts down. HideWindow
+        // alone would leave an invisible process running (issue #40).
+        let _ = slint::quit_event_loop();
         slint::CloseRequestResponse::HideWindow
     });
 
+    // Deterministic close-lifecycle gate (issue #40): exercise the exact
+    // close path a window manager triggers (WindowEvent::CloseRequested) and
+    // require the event loop to exit. A hang here means a normal close would
+    // leave an invisible process behind.
+    let _close_test_timer = close_self_test.then(|| {
+        let weak = app.as_weak();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(500),
+            move || {
+                if let Some(app) = weak.upgrade() {
+                    let _ = app
+                        .window()
+                        .try_dispatch_event(slint::platform::WindowEvent::CloseRequested);
+                }
+            },
+        );
+        timer
+    });
+
     app.run().expect("Slint event loop runs");
+
+    if close_self_test {
+        // The event loop returned after the synthetic close: the process is
+        // about to exit cleanly. Verify the config persisted on the close
+        // path loads back as valid.
+        let mut storage = XdgStorage::default_path()
+            .map(XdgStorage::new)
+            .expect("XDG config path resolvable");
+        let reloaded = config::load_persisted_config(&mut storage);
+        if reloaded.errors.is_empty() {
+            println!(
+                "521c: close-self-test OK (close ended the event loop; persisted config valid)"
+            );
+        } else {
+            eprintln!(
+                "521c: close-self-test FAIL (persisted config invalid: {})",
+                config::summarize_errors(&reloaded.errors, 3)
+            );
+            std::process::exit(1);
+        }
+    }
 }
