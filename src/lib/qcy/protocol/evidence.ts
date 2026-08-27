@@ -303,7 +303,7 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       payloadConfidence: "high",
     capability: "ancLevels",
     notes:
-      "ANC scene: mode, subScene, noiseValue. Confirmed on live HT08 over BLE GATT 2026-08-27: writes to char 00001001 of service 0000a001 executed with audible effect and notify ACK echoing the resulting state. Confirmed payloads: off=(2,0,0), indoor/ANC=(1,1,2), transparency=(3,2,4) ACKed as (3,2,0). Touch-sensor changes produced (1,3,2)=noisy and (2,0,0)=off. Cross-checked with OpenQCY mode table: commuting=(1,2,2), noisy=(1,3,2), wind=(1,4,2), adaptive=(1,5,2) (individual confirmation pending).",
+      "ANC scene: mode, subScene, noiseValue. Confirmed on live HT08 over BLE GATT 2026-08-27: writes to char 00001001 of service 0000a001 execute with notify ACK echoing the resulting state. Full mode table individually confirmed by firmware ACK: off=(2,0,0), indoor/ANC=(1,1,2), commuting=(1,2,2), noisy=(1,3,2), wind=(1,4,2) ACKed as (1,4,0), adaptive=(1,5,2) ACKed as (1,5,0), transparency=(3,2,4) ACKed as (3,2,0). Audible user confirmation (voice prompts) for off, indoor ('ANC on'), transparency and adaptive ('adaptive'); commuting/noisy/wind ACK-confirmed. Touch-sensor changes produce the same 0x17 notifications (e.g. (1,3,2)=noisy).",
     },
   ],
   [
