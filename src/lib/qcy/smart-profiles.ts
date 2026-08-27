@@ -7,6 +7,7 @@ export type NoiseUiMode =
   | "indoor"
   | "commuting"
   | "noisy"
+  | "wind"
   | "transparency";
 
 export type SmartProfile = {

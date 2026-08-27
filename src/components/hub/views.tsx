@@ -150,13 +150,12 @@ export function NoiseView() {
   const setNoise = useHub((s) => s.setNoise);
   const mode = currentNoiseUi(device);
   const caps = device.profile.capabilities;
-  const level = device.ancScene.subScene || 2;
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Panel
         title="Noise control"
-        description="Modes mapped from public QCY opcodes 0x0C and 0x17. Adaptive uses 0x32 and is experimental."
+        description="HT08 ANC scenes via opcode 0x17 [mode, subScene, noiseValue], validated on live hardware."
       >
         <div className="grid gap-2">
           {(
@@ -167,6 +166,7 @@ export function NoiseView() {
               ["indoor", "Indoor / silent", caps.ancIndoor],
               ["commuting", "Commuting / working", caps.ancCommuting],
               ["noisy", "Noisy environment", caps.ancNoisy],
+              ["wind", "Wind reduction", caps.ancWind],
               ["transparency", "Transparency", caps.transparency],
             ] as const
           ).map(([id, label, flag]) => (
@@ -185,22 +185,25 @@ export function NoiseView() {
             </button>
           ))}
         </div>
-        <div className="mt-4 rounded-lg border border-dashed border-border px-3 py-3 text-xs text-fg-muted">
-          Wind reduction is listed in the official app but has no public opcode yet — it is not shown as a working control.
-        </div>
       </Panel>
-      <Panel title="Level" description={mode === "transparency" ? "Transparency 1–7 (0x17 mode 0x0A)" : "ANC scene level 1–3"}>
-        <input
-          type="range"
-          min={1}
-          max={mode === "transparency" ? 7 : 3}
-          value={level}
-          onChange={(e) => void setNoise(mode, Number(e.target.value))}
-          className="w-full accent-[var(--color-accent)]"
-        />
-        <div className="mt-2 flex justify-between text-xs text-fg-muted">
-          <span>Level {level}</span>
-          <span>Noise depth {device.ancScene.noiseValue}</span>
+      <Panel title="Scene state" description="Reported by the device through 0x17 AncSetting notifications">
+        <div className="grid gap-2 text-sm">
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+            <span className="text-fg-muted">Mode byte</span>
+            <span className="font-mono">0x{device.ancScene.mode.toString(16).padStart(2, "0")}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+            <span className="text-fg-muted">Scene (subScene)</span>
+            <span className="font-mono">{device.ancScene.subScene}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+            <span className="text-fg-muted">Noise value</span>
+            <span className="font-mono">{device.ancScene.noiseValue}</span>
+          </div>
+        </div>
+        <div className="mt-4 rounded-lg border border-dashed border-border px-3 py-3 text-xs text-fg-muted">
+          Adjustable ANC/transparency levels are not validated on the HT08: the firmware uses one
+          fixed payload per scene (wind/adaptive/transparency normalize the noise value to 0).
         </div>
       </Panel>
     </div>

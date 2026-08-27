@@ -154,7 +154,7 @@ export function createInitialState(partial?: Partial<DeviceLiveState>): DeviceLi
     firmware: { left: "1.4.2", right: "1.4.2" },
     rssi: -48,
     noiseMode: 0x01,
-    ancScene: { mode: 0x02, subScene: 0x02, noiseValue: 80 },
+    ancScene: { mode: 0x01, subScene: 0x01, noiseValue: 0x02 },
     adaptive: false,
     gameMode: false,
     sleepMode: false,
@@ -282,6 +282,12 @@ export class MockTransport implements QcyTransport {
   private rssiTimer: ReturnType<typeof setInterval> | null = null;
   private smoothRssi = -48;
   private optIn: SessionOptIn = { ...DEFAULT_OPT_IN };
+  /**
+   * Deterministic test hook: when set to an opcode, framed writes containing a
+   * block with that opcode reject after policy authorization, simulating a
+   * device/transport failure for partial-failure coverage.
+   */
+  failOpcode: number | null = null;
 
   setExperimentalOptIn(on: boolean): void {
     this.optIn = { ...this.optIn, experimental: on };
@@ -350,6 +356,12 @@ export class MockTransport implements QcyTransport {
       : decoded.error.kind;
     this.emitLog("tx", bytes, summary, decoded.ok ? (decoded.packet.blocks[0]?.cmd ?? 0) : 0);
     if (!decoded.ok) return;
+    if (
+      this.failOpcode !== null &&
+      decoded.packet.blocks.some((b) => b.cmd === this.failOpcode)
+    ) {
+      throw new Error(`injected write failure for opcode 0x${this.failOpcode.toString(16)}`);
+    }
     for (const block of decoded.packet.blocks) {
       this.handleBlock(block);
     }
@@ -419,8 +431,10 @@ export class MockTransport implements QcyTransport {
           this.state = {
             ...this.state,
             ancScene: { mode: p[0]!, subScene: p[1]!, noiseValue: p[2]! },
-            noiseMode: p[0] === 0 ? 0 : p[0] === 0x0a ? 0x03 : 0x01,
-            adaptive: false,
+            // Hardware-validated HT08 table: mode 2 = off, mode 3 =
+            // transparency, mode 1 = ANC family (subScene 5 = adaptive).
+            noiseMode: p[0] === 0x02 ? 0x00 : p[0] === 0x03 ? 0x03 : 0x01,
+            adaptive: p[0] === 0x01 && p[1] === 0x05,
           };
         }
         const s = this.state.ancScene;

@@ -47,7 +47,21 @@ fn host_features_never_claim_device_support_or_writes() {
 #[test]
 fn proven_ht08_controls_are_interactable() {
     let profile = ht08_profile();
-    for id in ["gameMode", "deviceEq", "sleepMode"] {
+    for id in [
+        "gameMode",
+        "deviceEq",
+        "sleepMode",
+        // ANC scenes validated on live HT08 hardware (2026-08-27): opcode
+        // 0x17 with the fixed [mode, subScene, noiseValue] payload table.
+        "ancOff",
+        "ancOn",
+        "ancIndoor",
+        "ancCommuting",
+        "ancNoisy",
+        "ancWind",
+        "ancAdaptive",
+        "transparency",
+    ] {
         let cap = profile.get(id).expect("control entry");
         assert!(is_writable(cap), "{id} should be a supported write");
         assert!(can_interact(cap), "{id} should be interactable");
@@ -58,16 +72,9 @@ fn proven_ht08_controls_are_interactable() {
 #[test]
 fn experimental_controls_require_opt_in_and_are_labelled() {
     let profile = ht08_profile();
-    // ancOff/ancOn/transparency moved here after live HT08 evidence
-    // (2026-08-27) falsified the 0x0C NoiseCancelMode writes they used.
-    for id in [
-        "ancAdaptive",
-        "spatialAudio",
-        "ldacToggle",
-        "ancOff",
-        "ancOn",
-        "transparency",
-    ] {
+    // The ANC controls left this list once the 0x17 scene table was
+    // validated on live hardware (2026-08-27); 0x0C was the falsified path.
+    for id in ["spatialAudio", "ldacToggle"] {
         let cap = profile.get(id).expect("experimental entry");
         assert!(is_experimental_write(cap), "{id} should be experimental");
         assert!(can_interact(cap), "{id} is interactable behind opt-in");
@@ -97,9 +104,13 @@ fn read_only_status_capabilities_are_not_interactions() {
 #[test]
 fn unknown_or_research_rows_stay_downgraded() {
     let profile = ht08_profile();
-    let wind = profile.get("ancWind").expect("ancWind entry");
-    assert!(!can_interact(wind));
-    assert!(!is_implemented(wind));
+    // Adjustable level axes are not validated on HT08: the firmware uses one
+    // fixed payload per scene, so levels stay non-interactable research rows.
+    for id in ["ancLevels", "transparencyLevels"] {
+        let cap = profile.get(id).expect("level entry");
+        assert!(!can_interact(cap), "{id} must not be interactable");
+        assert!(!is_writable(cap), "{id} must not be writable");
+    }
     let gps = profile.get("findGps").expect("findGps entry");
     assert!(!is_shown(gps) || !can_interact(gps));
 }
