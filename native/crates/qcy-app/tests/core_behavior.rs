@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qcy_app::core::{AppCommand, AppCore, AppEvent, HostServices, SimpleNoise};
+use qcy_app::core::{AppCommand, AppCore, AppEvent, HostServices, SimpleNoise, SupervisorConfig};
 use qcy_protocol::packet::decode_packet;
 use qcy_transport::{DiscoveredDevice, Transport, TransportError, WritePolicy};
 
@@ -22,6 +22,12 @@ const ADDR: &str = "AA:BB:CC:DD:EE:FF";
 struct Shared {
     writes: Vec<Vec<u8>>,
     opt_in: bool,
+    /// Live link state as seen by the host (is_connected). Tests flip it to
+    /// simulate link loss; a successful connect restores it.
+    link_up: bool,
+    /// When true, connect() fails — used to exercise re-bootstrap failures.
+    fail_connect: bool,
+    connect_attempts: u32,
 }
 
 /// Recording transport. Mirrors the real transports' safety shape: the connected
@@ -73,6 +79,14 @@ impl Transport for TestTransport {
     }
 
     fn connect(&mut self, _address: &str) -> Result<(), TransportError> {
+        {
+            let mut shared = self.shared.lock().expect("shared mutex");
+            shared.connect_attempts += 1;
+            if shared.fail_connect {
+                return Err(TransportError::DeviceOutOfRange);
+            }
+            shared.link_up = true;
+        }
         self.connected = true;
         self.connected_model_known = self.model_known;
         Ok(())
@@ -81,7 +95,12 @@ impl Transport for TestTransport {
     fn disconnect(&mut self) -> Result<(), TransportError> {
         self.connected = false;
         self.connected_model_known = false;
+        self.shared.lock().expect("shared mutex").link_up = false;
         Ok(())
+    }
+
+    fn is_connected(&mut self) -> Result<bool, TransportError> {
+        Ok(self.connected && self.shared.lock().expect("shared mutex").link_up)
     }
 
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
@@ -541,5 +560,139 @@ fn attach_connected_applies_a_previous_model_attestation() {
         unreachable!()
     };
     assert!(snapshot.model_known, "previous attestation must apply");
+    handle.shutdown();
+}
+
+/// Fast supervisor timing for deterministic tests: 10 ms ticks, link checked
+/// every tick, re-bootstrap cooldown of 30 ms.
+fn fast_supervisor() -> SupervisorConfig {
+    SupervisorConfig {
+        tick: Duration::from_millis(10),
+        link_check_every_ticks: 1,
+        rebootstrap_cooldown: Duration::from_millis(30),
+    }
+}
+
+fn start_supervised(model_known: bool) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
+    let (transport, shared) = TestTransport::new(model_known);
+    (
+        AppCore::start_with_supervisor(
+            Box::new(transport),
+            HostServices::default(),
+            Vec::new(),
+            fast_supervisor(),
+        ),
+        shared,
+    )
+}
+
+#[test]
+fn resident_session_detects_link_loss_and_re_bootstraps() {
+    // Issue #54: reconnect-per-action is not viable on the HT08 control
+    // identity; the core must hold the session and re-bootstrap automatically
+    // after a link loss.
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+
+    // Simulate the earbuds dropping the LE link (case, sleep, out of range).
+    shared.lock().expect("shared mutex").link_up = false;
+    let lost = recv_until(&handle, |e| matches!(e, AppEvent::SessionLost { .. }));
+    assert_eq!(
+        lost,
+        AppEvent::SessionLost {
+            address: ADDR.into()
+        }
+    );
+
+    // The supervisor re-bootstraps in the background; TestTransport.connect()
+    // restores the link, so the session must come back on its own.
+    let restored = recv_until(&handle, |e| matches!(e, AppEvent::SessionRestored { .. }));
+    assert_eq!(
+        restored,
+        AppEvent::SessionRestored {
+            address: ADDR.into()
+        }
+    );
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn explicit_disconnect_disarms_the_supervisor() {
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    handle.send(AppCommand::Disconnect).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if !s.connected),
+    );
+
+    // Even if the host link state drops afterwards, no supervision events or
+    // reconnect attempts may happen after an explicit user disconnect.
+    shared.lock().expect("shared mutex").link_up = false;
+    let attempts_before = shared.lock().expect("shared mutex").connect_attempts;
+    std::thread::sleep(Duration::from_millis(120));
+    let attempts_after = shared.lock().expect("shared mutex").connect_attempts;
+    assert_eq!(
+        attempts_before, attempts_after,
+        "no background reconnect after explicit disconnect"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn re_bootstrap_failures_are_surfaced_once_per_error() {
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+
+    // Link drops while reconnects fail (e.g. HFP still held, out of window):
+    // the supervisor keeps retrying with cooldown but must not spam the UI
+    // with the same error.
+    {
+        let mut s = shared.lock().expect("shared mutex");
+        s.link_up = false;
+        s.fail_connect = true;
+    }
+    recv_until(&handle, |e| matches!(e, AppEvent::SessionLost { .. }));
+    let first = recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::Error(msg) if msg.starts_with("re-bootstrap:")),
+    );
+    // Several cooldown windows pass with the same failure...
+    std::thread::sleep(Duration::from_millis(120));
+    // ...and no duplicate error event is emitted for the unchanged error.
+    while let Some(event) = handle.try_recv_event(Duration::from_millis(20)) {
+        match event {
+            AppEvent::Error(msg) if msg.starts_with("re-bootstrap:") => {
+                panic!("duplicate re-bootstrap error: {msg} (first was {first:?})")
+            }
+            AppEvent::SessionRestored { .. } => panic!("must not restore while failing"),
+            _ => {}
+        }
+    }
+    let attempts = shared.lock().expect("shared mutex").connect_attempts;
+    assert!(
+        attempts >= 3,
+        "supervisor must keep retrying with cooldown (attempts: {attempts})"
+    );
+
+    // Once the blocker clears, the session restores itself.
+    shared.lock().expect("shared mutex").fail_connect = false;
+    recv_until(&handle, |e| matches!(e, AppEvent::SessionRestored { .. }));
     handle.shutdown();
 }

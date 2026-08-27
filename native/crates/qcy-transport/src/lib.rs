@@ -34,6 +34,11 @@ pub enum TransportError {
     /// Rejected by the central write-authorization policy.
     Denied(Denial),
     InvalidArgument(String),
+    /// LE connection initiation is blocked by an active HFP/SCO (hands-free)
+    /// session on the host. Live HT08 evidence (#52): while SCO is held, the
+    /// kernel aborts LE connects before reaching the controller. Releasing the
+    /// SCO session (e.g. switching the audio card to A2DP) clears the block.
+    HfpBlocked(String),
     /// Backend/D-Bus failure that does not map to a more specific variant.
     Bus(String),
 }
@@ -49,6 +54,10 @@ impl std::fmt::Display for TransportError {
             TransportError::NotFound(what) => write!(f, "not found: {what}"),
             TransportError::Denied(d) => write!(f, "write denied: {d}"),
             TransportError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            TransportError::HfpBlocked(detail) => write!(
+                f,
+                "LE control connection blocked by an active hands-free (HFP/SCO) session{detail}; release the microphone (e.g. set the audio card to A2DP) and retry"
+            ),
             TransportError::Bus(msg) => write!(f, "transport error: {msg}"),
         }
     }
@@ -85,6 +94,12 @@ pub trait Transport {
     /// Connect to the device with the given address and resolve required characteristics.
     fn connect(&mut self, address: &str) -> Result<(), TransportError>;
     fn disconnect(&mut self) -> Result<(), TransportError>;
+    /// Whether the transport currently holds a live device session. Used by the
+    /// application layer to detect link loss and re-bootstrap a resident
+    /// session. Transports without host state report `false`.
+    fn is_connected(&mut self) -> Result<bool, TransportError> {
+        Ok(false)
+    }
     /// Read an allowlisted characteristic.
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError>;
     /// Framed write to the command characteristic. Policy-checked.

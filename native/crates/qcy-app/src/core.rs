@@ -158,7 +158,44 @@ pub enum AppEvent {
     ModelConfirmed {
         address: String,
     },
+    /// Resident-session supervisor: the device link dropped. The core keeps
+    /// re-bootstrapping in the background (bounded attempts with cooldown)
+    /// until the user disconnects or the session is restored.
+    SessionLost {
+        address: String,
+    },
+    /// Resident-session supervisor: the background re-bootstrap succeeded and
+    /// the session is live again.
+    SessionRestored {
+        address: String,
+    },
     Info(String),
+}
+
+/// Timing for the resident-session supervisor (link-loss detection and
+/// background re-bootstrap). Live HT08 evidence (#50/#52): reconnect-per-action
+/// is not viable — the control identity only accepts LE connections during its
+/// advertisement windows — so a healthy session must be held and re-bootstrapped
+/// automatically after link loss. Defaults are conservative for real hardware;
+/// tests inject fast values.
+#[derive(Debug, Clone, Copy)]
+pub struct SupervisorConfig {
+    /// Idle command-loop tick (`recv_timeout`); the supervisor runs on ticks.
+    pub tick: std::time::Duration,
+    /// While connected, check the link every N ticks.
+    pub link_check_every_ticks: u32,
+    /// Cooldown between automatic re-bootstrap attempts after link loss.
+    pub rebootstrap_cooldown: std::time::Duration,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            tick: std::time::Duration::from_secs(1),
+            link_check_every_ticks: 5,
+            rebootstrap_cooldown: std::time::Duration::from_secs(15),
+        }
+    }
 }
 
 fn enable_byte(on: bool) -> u8 {
@@ -255,8 +292,19 @@ impl AppCore {
     /// connections start writable without re-asking.
     pub fn start(
         transport: Box<dyn Transport + Send>,
+        host: HostServices,
+        known_devices: Vec<String>,
+    ) -> AppHandle {
+        Self::start_with_supervisor(transport, host, known_devices, SupervisorConfig::default())
+    }
+
+    /// Like [`start`](Self::start) with explicit resident-session supervisor
+    /// timing (issue #54).
+    pub fn start_with_supervisor(
+        transport: Box<dyn Transport + Send>,
         mut host: HostServices,
         known_devices: Vec<String>,
+        supervisor: SupervisorConfig,
     ) -> AppHandle {
         let (cmd_tx, cmd_rx) = channel::<AppCommand>();
         let (event_tx, event_rx) = channel::<AppEvent>();
@@ -270,6 +318,12 @@ impl AppCore {
                 let mut snapshot = DeviceSnapshot::default();
                 let mut last_discovered: Vec<DiscoveredDevice> = Vec::new();
                 let mut experimental_opt_in = false;
+                // Resident-session supervisor state (#54): supervision arms on a
+                // successful connect and disarms on an explicit user disconnect.
+                let mut supervising = false;
+                let mut tick_count: u32 = 0;
+                let mut last_rebootstrap: Option<std::time::Instant> = None;
+                let mut last_rebootstrap_error: Option<String> = None;
 
                 let emit = |event: AppEvent| {
                     let _ = event_tx.send(event);
@@ -344,17 +398,77 @@ impl AppCore {
                     Ok(())
                 };
 
-                while let Ok(cmd) = cmd_rx.recv() {
+                loop {
+                    let cmd = match cmd_rx.recv_timeout(supervisor.tick) {
+                        Ok(cmd) => Some(cmd),
+                        Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => None,
+                    };
                     match cmd {
-                        AppCommand::Shutdown => break,
-                        AppCommand::Scan => match transport.scan() {
+                        None => {
+                            // Supervisor tick (#54): hold the resident session.
+                            tick_count = tick_count.wrapping_add(1);
+                            if supervising && snapshot.connected {
+                                if tick_count.is_multiple_of(supervisor.link_check_every_ticks.max(1)) {
+                                    match transport.is_connected() {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            snapshot.connected = false;
+                                            let addr = snapshot.address.clone();
+                                            emit(AppEvent::SessionLost { address: addr });
+                                            emit(AppEvent::StateChanged(snapshot.clone()));
+                                            last_rebootstrap = None;
+                                            last_rebootstrap_error = None;
+                                        }
+                                        Err(e) => emit(AppEvent::Error(format!(
+                                            "link state check failed: {e}"
+                                        ))),
+                                    }
+                                }
+                            } else if supervising && !snapshot.connected {
+                                // Re-bootstrap mode: retry the connection with a
+                                // cooldown until the user disconnects. Errors are
+                                // only surfaced when they change, so a long
+                                // out-of-window stretch does not spam the UI.
+                                let due = last_rebootstrap
+                                    .is_none_or(|t| t.elapsed() >= supervisor.rebootstrap_cooldown);
+                                if due {
+                                    last_rebootstrap = Some(std::time::Instant::now());
+                                    let address = snapshot.address.clone();
+                                    match do_connect(
+                                        &mut transport,
+                                        &mut snapshot,
+                                        &last_discovered,
+                                        &known_devices,
+                                        address.clone(),
+                                    ) {
+                                        Ok(()) => {
+                                            last_rebootstrap_error = None;
+                                            emit(AppEvent::SessionRestored { address });
+                                            emit(AppEvent::StateChanged(snapshot.clone()));
+                                        }
+                                        Err(msg) => {
+                                            if last_rebootstrap_error.as_deref() != Some(&msg) {
+                                                last_rebootstrap_error = Some(msg.clone());
+                                                emit(AppEvent::Error(format!(
+                                                    "re-bootstrap: {msg}"
+                                                )));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        Some(AppCommand::Shutdown) => break,
+                        Some(AppCommand::Scan) => match transport.scan() {
                             Ok(list) => {
                                 last_discovered = list.clone();
                                 emit(AppEvent::Discovered(list));
                             }
                             Err(e) => emit(AppEvent::Error(format!("scan failed: {e}"))),
                         },
-                        AppCommand::Connect(address) => {
+                        Some(AppCommand::Connect(address)) => {
                             match do_connect(
                                 &mut transport,
                                 &mut snapshot,
@@ -362,11 +476,17 @@ impl AppCore {
                                 &known_devices,
                                 address,
                             ) {
-                                Ok(()) => emit(AppEvent::StateChanged(snapshot.clone())),
+                                Ok(()) => {
+                                    // A user-established session becomes the
+                                    // resident session (#54): the supervisor
+                                    // holds it and re-bootstraps on link loss.
+                                    supervising = true;
+                                    emit(AppEvent::StateChanged(snapshot.clone()));
+                                }
                                 Err(msg) => emit(AppEvent::Error(msg)),
                             }
                         }
-                        AppCommand::AttachConnected => {
+                        Some(AppCommand::AttachConnected) => {
                             if snapshot.connected {
                                 continue;
                             }
@@ -389,6 +509,7 @@ impl AppCore {
                                         address,
                                     ) {
                                         Ok(()) => {
+                                            supervising = true;
                                             emit(AppEvent::StateChanged(snapshot.clone()))
                                         }
                                         Err(msg) => emit(AppEvent::Error(msg)),
@@ -399,7 +520,7 @@ impl AppCore {
                                 }
                             }
                         }
-                        AppCommand::ConfirmModel { address } => {
+                        Some(AppCommand::ConfirmModel { address }) => {
                             let normalized = normalize_address(&address);
                             if !snapshot.connected
                                 || normalize_address(&snapshot.address) != normalized
@@ -418,16 +539,19 @@ impl AppCore {
                             emit(AppEvent::ModelConfirmed { address: normalized });
                             emit(AppEvent::StateChanged(snapshot.clone()));
                         }
-                        AppCommand::Disconnect => {
+                        Some(AppCommand::Disconnect) => {
+                            // Explicit user disconnect disarms the resident
+                            // session; no background re-bootstrap after it.
+                            supervising = false;
                             let _ = transport.disconnect();
                             snapshot = DeviceSnapshot::default();
                             emit(AppEvent::StateChanged(snapshot.clone()));
                         }
-                        AppCommand::RefreshStatus => {
+                        Some(AppCommand::RefreshStatus) => {
                             refresh_status(&mut transport, &mut snapshot);
                             emit(AppEvent::StateChanged(snapshot.clone()));
                         }
-                        AppCommand::SetNoise(mode) => {
+                        Some(AppCommand::SetNoise(mode)) => {
                             match encode_command(Cmd::NoiseCancelMode as u8, &[mode.byte()]) {
                                 Ok(frame) => match write_frame(&mut transport, frame) {
                                     Ok(()) => emit(AppEvent::Info(format!(
@@ -438,7 +562,7 @@ impl AppCore {
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
                             }
                         }
-                        AppCommand::SetAncScene(scene) => {
+                        Some(AppCommand::SetAncScene(scene)) => {
                             match encode_command(
                                 Cmd::AncSetting as u8,
                                 &[scene.mode, scene.sub_scene, scene.noise_value],
@@ -450,7 +574,7 @@ impl AppCore {
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
                             }
                         }
-                        AppCommand::SetGameMode(on) => {
+                        Some(AppCommand::SetGameMode(on)) => {
                             match encode_command(Cmd::LowLatency as u8, &[enable_byte(on)]) {
                                 Ok(frame) => match write_frame(&mut transport, frame) {
                                     Ok(()) => emit(AppEvent::Info(format!(
@@ -462,7 +586,7 @@ impl AppCore {
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
                             }
                         }
-                        AppCommand::SetSleepMode(on) => {
+                        Some(AppCommand::SetSleepMode(on)) => {
                             match encode_command(Cmd::SleepMode as u8, &[enable_byte(on)]) {
                                 Ok(frame) => match write_frame(&mut transport, frame) {
                                     Ok(()) => emit(AppEvent::Info(format!(
@@ -474,7 +598,7 @@ impl AppCore {
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
                             }
                         }
-                        AppCommand::SetInEarDetection(on) => {
+                        Some(AppCommand::SetInEarDetection(on)) => {
                             match encode_command(Cmd::InEarDetection as u8, &[enable_byte(on)]) {
                                 Ok(frame) => match write_frame(&mut transport, frame) {
                                     Ok(()) => emit(AppEvent::Info(format!(
@@ -486,12 +610,12 @@ impl AppCore {
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
                             }
                         }
-                        AppCommand::FindChime {
+                        Some(AppCommand::FindChime {
                             led,
                             chime,
                             tone_id,
                             confirmed_not_worn,
-                        } => {
+                        }) => {
                             // Interactive preflight gate (issue #9 mirror): the chime is
                             // refused unless a human confirmed the earbuds are not worn.
                             if !confirmed_not_worn {
@@ -520,7 +644,7 @@ impl AppCore {
                                 }
                             }
                         }
-                        AppCommand::SetExperimentalOptIn(on) => {
+                        Some(AppCommand::SetExperimentalOptIn(on)) => {
                             experimental_opt_in = on;
                             transport.set_experimental_opt_in(on);
                             emit(AppEvent::Info(format!(
@@ -528,7 +652,7 @@ impl AppCore {
                                 if on { "enabled for this session" } else { "disabled" }
                             )));
                         }
-                        AppCommand::MediaStatus => match host.mpris.as_mut() {
+                        Some(AppCommand::MediaStatus) => match host.mpris.as_mut() {
                             Some(f) => match f(MediaRequest::Status) {
                                 Ok(status) => emit(AppEvent::HostMedia(status)),
                                 Err(e) => emit(AppEvent::Error(e)),
@@ -537,7 +661,7 @@ impl AppCore {
                                 "MPRIS is not available in this build/session".into(),
                             )),
                         },
-                        AppCommand::MediaControl(action) => match host.mpris.as_mut() {
+                        Some(AppCommand::MediaControl(action)) => match host.mpris.as_mut() {
                             Some(f) => match f(MediaRequest::Control(action)) {
                                 Ok(status) => emit(AppEvent::HostMedia(status)),
                                 Err(e) => emit(AppEvent::Error(e)),
@@ -546,11 +670,11 @@ impl AppCore {
                                 "MPRIS is not available in this build/session".into(),
                             )),
                         },
-                        AppCommand::CodecStatus => match host.codec.as_mut() {
+                        Some(AppCommand::CodecStatus) => match host.codec.as_mut() {
                             Some(f) => emit(AppEvent::HostCodec(f())),
                             None => emit(AppEvent::HostCodec(CodecInfo::unknown())),
                         },
-                        AppCommand::SystemEqOn(gains) => match host.system_eq.as_mut() {
+                        Some(AppCommand::SystemEqOn(gains)) => match host.system_eq.as_mut() {
                             Some(f) => match f(SystemEqCommand::On(gains)) {
                                 Ok(status) => emit(AppEvent::HostSystemEq(status)),
                                 Err(e) => emit(AppEvent::Error(e)),
@@ -559,7 +683,7 @@ impl AppCore {
                                 "System EQ is not available in this build".into(),
                             )),
                         },
-                        AppCommand::SystemEqOff => match host.system_eq.as_mut() {
+                        Some(AppCommand::SystemEqOff) => match host.system_eq.as_mut() {
                             Some(f) => match f(SystemEqCommand::Off) {
                                 Ok(status) => emit(AppEvent::HostSystemEq(status)),
                                 Err(e) => emit(AppEvent::Error(e)),
@@ -568,7 +692,7 @@ impl AppCore {
                                 "System EQ is not available in this build".into(),
                             )),
                         },
-                        AppCommand::SystemEqStatus => match host.system_eq.as_mut() {
+                        Some(AppCommand::SystemEqStatus) => match host.system_eq.as_mut() {
                             Some(f) => match f(SystemEqCommand::Status) {
                                 Ok(status) => emit(AppEvent::HostSystemEq(status)),
                                 Err(e) => emit(AppEvent::Error(e)),
