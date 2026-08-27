@@ -68,6 +68,10 @@ impl Transport for MockTransport {
         Ok(())
     }
 
+    fn is_connected(&mut self) -> Result<bool, TransportError> {
+        Ok(self.connected)
+    }
+
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);

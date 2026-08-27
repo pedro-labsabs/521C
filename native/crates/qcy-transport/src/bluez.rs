@@ -62,6 +62,11 @@ pub trait BlueZBus: Send {
     fn write_value(&self, char_path: &str, bytes: &[u8]) -> Result<(), TransportError>;
     fn start_notify(&self, char_path: &str) -> Result<(), TransportError>;
     fn stop_notify(&self, char_path: &str) -> Result<(), TransportError>;
+    /// Object path of the device holding an active (or being-acquired)
+    /// HFP/HSP SCO media transport, if any. Live HT08 evidence (#52): while
+    /// SCO is held, LE connection initiation is aborted by the host on some
+    /// controllers, so the transport must surface this before trying LE.
+    fn active_hfp_transport(&self) -> Result<Option<String>, TransportError>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -71,6 +76,42 @@ pub trait BlueZBus: Send {
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 const SERVICE_IFACE: &str = "org.bluez.GattService1";
 const CHAR_IFACE: &str = "org.bluez.GattCharacteristic1";
+const TRANSPORT_IFACE: &str = "org.bluez.MediaTransport1";
+
+/// UUID prefixes (lowercase, 16-bit form inside the full 128-bit UUID) for
+/// profiles that carry SCO: HSP headset/gateway and HFP handsfree/gateway.
+/// A2DP source/sink are intentionally excluded — music playback does not
+/// block LE.
+const SCO_UUID_PREFIXES: &[&str] = &["00001108", "00001109", "0000111e", "0000111f"];
+
+/// Scan managed objects for a MediaTransport1 in `active`/`pending` state
+/// whose UUID is an HFP/HSP (SCO) profile. Returns the owning device path.
+fn find_active_hfp_transport(objects: &[BlueZObject]) -> Option<String> {
+    for obj in objects {
+        let Some(props) = obj.interfaces.get(TRANSPORT_IFACE) else {
+            continue;
+        };
+        let uuid = match props.get("UUID") {
+            Some(PropValue::Str(u)) => u.to_ascii_lowercase(),
+            _ => continue,
+        };
+        if !SCO_UUID_PREFIXES.iter().any(|pfx| uuid.starts_with(pfx)) {
+            continue;
+        }
+        let state = match props.get("State") {
+            Some(PropValue::Str(s)) => s.as_str(),
+            _ => "idle",
+        };
+        if state != "active" && state != "pending" {
+            continue;
+        }
+        if let Some(PropValue::Str(device)) = props.get("Device") {
+            return Some(device.clone());
+        }
+        return Some(obj.path.clone());
+    }
+    None
+}
 
 /// Name prefixes treated as candidate QCY devices during discovery.
 const QCY_NAME_PREFIXES: &[&str] = &["QCY", "MeloBuds"];
@@ -456,6 +497,13 @@ impl Transport for BlueZTransport {
                 .find(|o| o.path == path)
                 .and_then(|o| Self::device_name_of(o).map(|s| s.to_string()))
         });
+        // HFP preflight (live HT08 evidence, #52): while an HFP/SCO session is
+        // held, this controller aborts LE connection initiation before any HCI
+        // command is issued (le-connection-abort-by-local). Fail fast with an
+        // actionable diagnostic instead of burning the discovery window.
+        if let Some(holder) = self.bus.active_hfp_transport()? {
+            return Err(TransportError::HfpBlocked(format!(" ({holder})")));
+        }
         if self.find_le_identity(address, original_name.as_deref()) {
             return Ok(());
         }
@@ -474,6 +522,24 @@ impl Transport for BlueZTransport {
             self.bus.device_disconnect(&path)?;
         }
         Ok(())
+    }
+
+    fn is_connected(&mut self) -> Result<bool, TransportError> {
+        let Some(path) = self.device_path.clone() else {
+            return Ok(false);
+        };
+        // Link loss appears as the device object's Connected property flipping
+        // to false (or the object vanishing); both mean the session is gone.
+        let objects = self.bus.managed_objects()?;
+        Ok(objects.iter().any(|o| {
+            o.path == path
+                && matches!(
+                    o.interfaces
+                        .get(DEVICE_IFACE)
+                        .and_then(|p| p.get("Connected")),
+                    Some(PropValue::Bool(true))
+                )
+        }))
     }
 
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
@@ -714,6 +780,10 @@ impl BlueZBus for ZbusBlueZBus {
             .map(|_| ())
             .map_err(Self::map_dbus_err)
     }
+
+    fn active_hfp_transport(&self) -> Result<Option<String>, TransportError> {
+        Ok(find_active_hfp_transport(&self.managed_objects()?))
+    }
 }
 
 #[cfg(test)]
@@ -727,7 +797,10 @@ mod tests {
 
     #[derive(Default)]
     struct FakeBus {
-        objects: Vec<BlueZObject>,
+        /// Shared, interior-mutable so tests can keep a handle and simulate
+        /// host-side changes (link loss, SCO acquisition) after the bus is
+        /// moved into the transport.
+        objects: Arc<Mutex<Vec<BlueZObject>>>,
         connected: RefCell<bool>,
         writes: WriteLog,
         notifies: Arc<Mutex<Vec<String>>>,
@@ -797,7 +870,7 @@ mod tests {
 
     impl BlueZBus for FakeBus {
         fn managed_objects(&self) -> Result<Vec<BlueZObject>, TransportError> {
-            Ok(self.objects.clone())
+            Ok(self.objects.lock().expect("objects mutex").clone())
         }
         fn start_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
             Ok(())
@@ -849,12 +922,17 @@ mod tests {
         fn stop_notify(&self, _p: &str) -> Result<(), TransportError> {
             Ok(())
         }
+        fn active_hfp_transport(&self) -> Result<Option<String>, TransportError> {
+            Ok(find_active_hfp_transport(
+                &self.objects.lock().expect("objects mutex"),
+            ))
+        }
     }
 
     fn transport(objects: Vec<BlueZObject>) -> (BlueZTransport, WriteLog) {
         let writes = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
-            objects,
+            objects: Arc::new(Mutex::new(objects)),
             writes: writes.clone(),
             ..Default::default()
         };
@@ -872,7 +950,7 @@ mod tests {
         let writes = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
-            objects,
+            objects: Arc::new(Mutex::new(objects)),
             writes: writes.clone(),
             connect_calls: calls.clone(),
             ..Default::default()
@@ -1040,7 +1118,7 @@ mod tests {
     fn connect_failure_surfaces_structured_error() {
         let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
-            objects: ht08_fixture(),
+            objects: Arc::new(Mutex::new(ht08_fixture())),
             writes: writes.clone(),
             fail_connect: true,
             ..Default::default()
@@ -1128,7 +1206,7 @@ mod tests {
         // re-connecting A as B's "identity".
         let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
-            objects: two_device_fixture(),
+            objects: Arc::new(Mutex::new(two_device_fixture())),
             writes: writes.clone(),
             fail_connect_paths: RefCell::new(vec![device_path("hci0", "11:22:33:44:55:66")]),
             ..Default::default()
@@ -1360,7 +1438,7 @@ mod tests {
         let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let bus = FakeBus {
-            objects: ht08_fixture(),
+            objects: Arc::new(Mutex::new(ht08_fixture())),
             writes: writes.clone(),
             busy_connect_paths: vec![dev_path.clone()],
             connect_calls: calls.clone(),
@@ -1436,5 +1514,130 @@ mod tests {
     fn connected_devices_is_empty_without_connected_devices() {
         let (mut t, _writes) = transport(ht08_fixture());
         assert!(t.connected_devices().unwrap().is_empty());
+    }
+
+    /// MediaTransport1 object fixture: an SCO (HFP) transport on the BR/EDR
+    /// audio identity, as BlueZ exposes it while a call/mic session is held.
+    fn hfp_transport_obj(state: &str) -> BlueZObject {
+        obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA/fd0",
+            TRANSPORT_IFACE,
+            vec![
+                (
+                    "UUID",
+                    PropValue::Str("0000111f-0000-1000-8000-00805f9b34fb".into()),
+                ),
+                ("State", PropValue::Str(state.into())),
+                (
+                    "Device",
+                    PropValue::Str("/org/bluez/hci0/dev_84_AC_60_62_69_DA".into()),
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn active_hfp_transport_blocks_the_le_fallback_with_an_actionable_error() {
+        // Live HT08 evidence (#52): while SCO is held, LE connects are aborted
+        // by the host. The connect path must fail fast with HfpBlocked instead
+        // of burning the discovery window on attempts that cannot succeed.
+        let mut objects = ht08_fixture();
+        // Remove GATT so the primary connect fails and the LE fallback is the
+        // only way forward.
+        objects.retain(|o| !o.path.contains("service"));
+        objects.push(hfp_transport_obj("active"));
+        let (mut t, _writes, calls) = transport_with_calls(objects);
+        let err = t.connect("F8:5C:7D:12:08:08").unwrap_err();
+        match err {
+            TransportError::HfpBlocked(detail) => {
+                assert!(detail.contains("dev_84_AC_60_62_69_DA"), "{detail}");
+            }
+            other => panic!("expected HfpBlocked, got {other:?}"),
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "only the primary Connect may happen; the LE fallback must not start while HFP blocks"
+        );
+    }
+
+    #[test]
+    fn pending_hfp_transport_also_blocks() {
+        let mut objects = ht08_fixture();
+        objects.retain(|o| !o.path.contains("service"));
+        objects.push(hfp_transport_obj("pending"));
+        let (mut t, _writes, _calls) = transport_with_calls(objects);
+        assert!(matches!(
+            t.connect("F8:5C:7D:12:08:08"),
+            Err(TransportError::HfpBlocked(_))
+        ));
+    }
+
+    #[test]
+    fn idle_hfp_and_a2dp_transports_do_not_block() {
+        // SCO released (idle) or music-only (A2DP sink) must not block LE.
+        let mut objects = ht08_fixture();
+        objects.push(hfp_transport_obj("idle"));
+        objects.push(obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA/fd1",
+            TRANSPORT_IFACE,
+            vec![
+                (
+                    "UUID",
+                    PropValue::Str("0000110b-0000-1000-8000-00805f9b34fb".into()),
+                ),
+                ("State", PropValue::Str("active".into())),
+                (
+                    "Device",
+                    PropValue::Str("/org/bluez/hci0/dev_84_AC_60_62_69_DA".into()),
+                ),
+            ],
+        ));
+        let (mut t, _writes) = transport(objects);
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+    }
+
+    #[test]
+    fn is_connected_tracks_the_device_link_state() {
+        let writes: WriteLog = Arc::new(Mutex::new(Vec::new()));
+        let bus = FakeBus {
+            objects: Arc::new(Mutex::new(ht08_fixture_connected())),
+            writes: writes.clone(),
+            ..Default::default()
+        };
+        let objects = bus.objects.clone();
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert!(t.is_connected().unwrap(), "session is live after connect");
+
+        // Simulate link loss: the device object flips Connected to false.
+        {
+            let mut objs = objects.lock().expect("objects mutex");
+            let dev = objs
+                .iter_mut()
+                .find(|o| o.interfaces.contains_key(DEVICE_IFACE))
+                .expect("device object");
+            dev.interfaces
+                .get_mut(DEVICE_IFACE)
+                .unwrap()
+                .insert("Connected".to_string(), PropValue::Bool(false));
+        }
+        assert!(
+            !t.is_connected().unwrap(),
+            "link loss must be visible to the session supervisor"
+        );
+    }
+
+    #[test]
+    fn is_connected_is_false_before_connect_and_after_disconnect() {
+        let (mut t, _writes) = transport(ht08_fixture_connected());
+        assert!(!t.is_connected().unwrap());
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        assert!(t.is_connected().unwrap());
+        t.disconnect().unwrap();
+        assert!(!t.is_connected().unwrap());
     }
 }

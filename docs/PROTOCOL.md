@@ -77,9 +77,15 @@ Live HT08 findings (issues #50/#52, 2026-08-27):
 - Confirmed over BLE GATT on Linux (no root): battery/version reads, and ANC
   writes to char `00001001` (write-without-response) with notify ACKs on
   `00001002`. LE control and BR/EDR audio hold simultaneously.
-- The control identity advertises intermittently; after bonding, the LE link
-  must be kept resident (reconnect on demand fails outside advertisement
-  windows). See `docs/devices/HT08.md` and issue #52 for the bootstrap model.
+- The control identity advertises connectable ADV_IND during normal use, but
+  LE connection initiation is blocked host-side while an HFP/SCO (hands-free)
+  session is active on the BR/EDR link: the kernel aborts the attempt before
+  any HCI command (`le-connection-abort-by-local`). Bootstrap procedure:
+  release HFP (audio card on A2DP, mic free) → LE discovery → connect in the
+  advertisement window → `Pair()` if unbonded → hold the session resident.
+  The native core supervises the resident session: link loss triggers
+  background re-bootstrap with cooldown (`SupervisorConfig`), and explicit
+  user disconnect disarms it. See `docs/devices/HT08.md` and issues #50/#52/#54.
 - HT08 SPP channel 1 ("COM5") only byte-ACKs frames and executes nothing;
   channels 4/5 are silent. SPP remains a valid generic path only for models
   whose evidence points there.

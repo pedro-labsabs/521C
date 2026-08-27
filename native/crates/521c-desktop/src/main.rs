@@ -585,6 +585,27 @@ fn main() {
                                 append_log(&log, &format!("Model confirmed: {address}")).into(),
                             );
                         }
+                        AppEvent::SessionLost { address } => {
+                            connected_flag.store(false, Ordering::SeqCst);
+                            state.set_status_line(
+                                format!("Link to {address} lost; reconnecting in background…")
+                                    .into(),
+                            );
+                            let log = state.get_event_log();
+                            state.set_event_log(
+                                append_log(&log, &format!("SESSION LOST: {address}")).into(),
+                            );
+                        }
+                        AppEvent::SessionRestored { address } => {
+                            connected_flag.store(true, Ordering::SeqCst);
+                            state.set_status_line(
+                                format!("Session with {address} restored.").into(),
+                            );
+                            let log = state.get_event_log();
+                            state.set_event_log(
+                                append_log(&log, &format!("SESSION RESTORED: {address}")).into(),
+                            );
+                        }
                     }
                 });
                 if ok.is_err() {
