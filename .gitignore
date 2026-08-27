@@ -18,3 +18,4 @@ native/target/
 scripts/agent/
 .prime/agent/skills/
 .prime/agent/settings.json
+__pycache__/

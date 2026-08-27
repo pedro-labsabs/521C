@@ -69,7 +69,6 @@ describe("central write policy · unknown/generic devices are read-only", () => 
 
 describe("central write policy · HT08 supported writes", () => {
   const supported: Array<[string, Uint8Array]> = [
-    ["noiseMode", encodeCommand(Cmd.NoiseCancelMode, [0x01])],
     ["ancSetting", encodeCommand(Cmd.AncSetting, [0x02, 0x02, 80])],
     ["lowLatency", encodeCommand(Cmd.LowLatency, [0x01])],
     ["inEar", encodeCommand(Cmd.InEarDetection, [0x01])],
@@ -104,6 +103,21 @@ describe("central write policy · experimental opt-in", () => {
   it("allows enabling an experimental opcode with opt-in", () => {
     const frame = encodeCommand(Cmd.SpatialAudio, [0x01]);
     expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, frame).ok).toBe(true);
+  });
+
+  it("treats NoiseCancelMode 0x0C as experimental after live HT08 falsification", () => {
+    // Live HT08 unit ignored 0x0C writes (2026-08-27); 0x17 is the confirmed
+    // ANC path. Enabling ANC via 0x0C now requires the experimental opt-in...
+    const enable = encodeCommand(Cmd.NoiseCancelMode, [0x01]);
+    expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, enable).ok).toBe(false);
+    expect(denialOf(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, enable))?.code)
+      .toBe("experimental-opt-in-required");
+    expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, enable).ok).toBe(true);
+    // 0x0C "off" is 0x00, which does not match the 0x02 pure-disable
+    // convention, so it is gated the same way until re-evidenced.
+    const disable = encodeCommand(Cmd.NoiseCancelMode, [0x00]);
+    expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, disable).ok).toBe(false);
+    expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, disable).ok).toBe(true);
   });
 
   it("allows disabling an experimental opcode without opt-in (safe cleanup)", () => {
