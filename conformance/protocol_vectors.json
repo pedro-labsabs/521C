@@ -328,5 +328,28 @@
         "expect": null
       }
     ]
+  },
+  "spp": {
+    "consumers": [
+      "rust"
+    ],
+    "note": "SPP/RFCOMM transport mapping (issue #50): BlueZ does not expose the QCY vendor GATT service for these dual-mode earbuds on Linux; the control path is SPP (UUID 00001101) carrying the same 0xFF framing pinned above. Reads are RequestData(0xFE) exchanges. Every byte below is composed from vectors already documented in this corpus (decode 'battery-request', decode 'multi-block' battery block, firmware 'six-bytes') - no new protocol facts. HT08 on-wire confirmation is tracked in the evidence ledger.",
+    "defaultChannel": 1,
+    "reads": [
+      {
+        "name": "battery",
+        "charUuid": "00000008-0000-1000-8000-00805f9b34fb",
+        "requestHex": "ff03fe012f",
+        "responseHex": "ff052f0352505e",
+        "expectHex": "52505e"
+      },
+      {
+        "name": "version",
+        "charUuid": "00000007-0000-1000-8000-00805f9b34fb",
+        "requestHex": "ff03fe0130",
+        "responseHex": "ff083006010402010402",
+        "expectHex": "010402010402"
+      }
+    ]
   }
 }

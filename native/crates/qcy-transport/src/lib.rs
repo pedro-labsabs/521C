@@ -1,18 +1,23 @@
 //! Transport abstraction for QCY BLE device I/O (issue #7).
 //!
 //! This crate sits above [`qcy_protocol`] (framing/codecs) and below the CLI/GUI. It
-//! defines a single [`Transport`] trait with two backends:
+//! defines a single [`Transport`] trait with three backends:
 //!
 //!   * [`mock::MockTransport`] — deterministic, hardware-free, used by tests and dev.
 //!   * [`bluez::BlueZTransport`] — talks to the system BlueZ stack over D-Bus GATT.
+//!   * [`rfcomm::RfcommTransport`] — SPP/RFCOMM byte stream (issue #50): the control
+//!     path BlueZ actually exposes for QCY dual-mode earbuds on Linux, carrying the
+//!     same `0xFF`-framed protocol as the GATT path.
 //!
 //! All outbound operations are checked against the central [`policy::WritePolicy`]
 //! (the Rust mirror of issue #1's authorization model) before reaching the wire. The
-//! BlueZ backend is event-driven and never requires root or a reconfigured daemon.
+//! BlueZ backend is event-driven and never requires root or a reconfigured daemon;
+//! the RFCOMM backend opens a raw `AF_BLUETOOTH` socket, also without root.
 
 pub mod bluez;
 pub mod mock;
 pub mod policy;
+pub mod rfcomm;
 
 pub use policy::{Denial, WritePolicy};
 
