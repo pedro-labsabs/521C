@@ -28,6 +28,8 @@ struct Shared {
     /// When true, connect() fails — used to exercise re-bootstrap failures.
     fail_connect: bool,
     connect_attempts: u32,
+    /// Proven reads observed (keepalive coverage).
+    reads: u32,
 }
 
 /// Recording transport. Mirrors the real transports' safety shape: the connected
@@ -107,6 +109,7 @@ impl Transport for TestTransport {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
+        self.shared.lock().expect("shared mutex").reads += 1;
         let uuid = char_uuid.to_ascii_lowercase();
         if uuid.contains("00000008") {
             Ok(vec![0x52, 0x50, 0x5E])
@@ -296,20 +299,33 @@ fn supported_write_produces_an_authorized_frame() {
 }
 
 #[test]
-fn noise_mode_maps_to_the_documented_opcode() {
+fn noise_mode_maps_to_the_validated_anc_setting_table() {
+    // Live HT08 evidence (#50/#52/#54): SetNoise must emit 0x17 AncSetting
+    // with the validated [mode, subScene, noiseValue] payloads — never the
+    // falsified 0x0C NoiseCancelMode.
     let (handle, shared) = start(true);
     scan_and_connect(&handle);
-    handle
-        .send(AppCommand::SetNoise(SimpleNoise::Transparency))
-        .unwrap();
-    recv_until(&handle, |e| matches!(e, AppEvent::Info(_)));
-    let writes = shared.lock().expect("shared mutex").writes.clone();
-    let packet = decode_packet(&writes[0]).expect("frame decodes");
-    assert_eq!(
-        packet.blocks[0].cmd,
-        qcy_protocol::Cmd::NoiseCancelMode as u8
-    );
-    assert_eq!(packet.blocks[0].params, vec![0x03]);
+    let cases: &[(SimpleNoise, &[u8])] = &[
+        (SimpleNoise::Off, &[0x02, 0x00, 0x00]),
+        (SimpleNoise::Anc, &[0x01, 0x01, 0x02]),
+        (SimpleNoise::Adaptive, &[0x01, 0x05, 0x02]),
+        (SimpleNoise::Commuting, &[0x01, 0x02, 0x02]),
+        (SimpleNoise::Noisy, &[0x01, 0x03, 0x02]),
+        (SimpleNoise::Wind, &[0x01, 0x04, 0x02]),
+        (SimpleNoise::Transparency, &[0x03, 0x02, 0x04]),
+    ];
+    for (mode, params) in cases {
+        handle.send(AppCommand::SetNoise(*mode)).unwrap();
+        recv_until(&handle, |e| matches!(e, AppEvent::Info(_)));
+        let writes = shared.lock().expect("shared mutex").writes.clone();
+        let packet = decode_packet(writes.last().expect("write recorded")).expect("frame decodes");
+        assert_eq!(
+            packet.blocks[0].cmd,
+            qcy_protocol::Cmd::AncSetting as u8,
+            "{mode:?} must use 0x17 AncSetting"
+        );
+        assert_eq!(packet.blocks[0].params, *params, "{mode:?} payload");
+    }
     handle.shutdown();
 }
 
@@ -421,13 +437,14 @@ fn confirm_model_lifts_read_only_and_reports_attestation() {
         |e| matches!(e, AppEvent::StateChanged(s) if s.model_known),
     );
 
-    // Supported writes now reach the transport.
+    // Supported writes now reach the transport: validated 0x17 ANC scene.
     handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
     recv_until(&handle, |e| matches!(e, AppEvent::Info(_)));
     let writes = shared.lock().expect("shared mutex").writes.clone();
     assert_eq!(writes.len(), 1);
     let frame = decode_packet(&writes[0]).expect("frame decodes");
-    assert_eq!(frame.blocks[0].cmd, 0x0C);
+    assert_eq!(frame.blocks[0].cmd, 0x17);
+    assert_eq!(frame.blocks[0].params, vec![0x01, 0x01, 0x02]);
     handle.shutdown();
 }
 
@@ -569,6 +586,7 @@ fn fast_supervisor() -> SupervisorConfig {
     SupervisorConfig {
         tick: Duration::from_millis(10),
         link_check_every_ticks: 1,
+        status_refresh_every_ticks: 5,
         rebootstrap_cooldown: Duration::from_millis(30),
     }
 }
@@ -620,6 +638,33 @@ fn resident_session_detects_link_loss_and_re_bootstraps() {
     recv_until(
         &handle,
         |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn keepalive_issues_periodic_status_reads_while_connected() {
+    // The resident session must generate periodic GATT traffic: the HT08
+    // firmware drops fully idle LE links (live evidence, #54).
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let reads_after_connect = shared.lock().expect("shared mutex").reads;
+    // fast supervisor refreshes every 5 ticks (~50 ms); no user commands sent.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if shared.lock().expect("shared mutex").reads >= reads_after_connect + 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let reads = shared.lock().expect("shared mutex").reads;
+    assert!(
+        reads >= reads_after_connect + 2,
+        "keepalive must keep issuing proven reads (before: {reads_after_connect}, after: {reads})"
     );
     handle.shutdown();
 }

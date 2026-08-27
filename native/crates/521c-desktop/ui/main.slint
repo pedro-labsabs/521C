@@ -38,7 +38,7 @@ export global AppState {
     in-out property <bool> has-battery: false;
 
     // Controls
-    in-out property <int> noise-mode: 0; // 0 off, 1 anc, 2 outdoor, 3 transparency
+    in-out property <int> noise-mode: -1; // -1 unknown, 0 off, 1 anc, 2 adaptive, 3 commuting, 4 noisy, 5 wind, 6 transparency
     in-out property <bool> game-mode: false;
     in-out property <bool> sleep-mode: false;
     in-out property <bool> in-ear-detection: true;
@@ -222,27 +222,48 @@ export component MainWindow inherits Window {
                     GroupBox {
                         title: "Noise control";
                         enabled: AppState.connected && AppState.model-known;
-                        HorizontalBox {
-                            spacing: 6px;
-                            Button {
-                                text: "Off";
-                                enabled: AppState.noise-mode != 0;
-                                clicked => { root.noise-changed(0); }
+                        VerticalBox {
+                            spacing: 4px;
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button {
+                                    text: "Off";
+                                    enabled: AppState.noise-mode != 0;
+                                    clicked => { root.noise-changed(0); }
+                                }
+                                Button {
+                                    text: "ANC";
+                                    enabled: AppState.noise-mode != 1;
+                                    clicked => { root.noise-changed(1); }
+                                }
+                                Button {
+                                    text: "Adaptive";
+                                    enabled: AppState.noise-mode != 2;
+                                    clicked => { root.noise-changed(2); }
+                                }
+                                Button {
+                                    text: "Commuting";
+                                    enabled: AppState.noise-mode != 3;
+                                    clicked => { root.noise-changed(3); }
+                                }
                             }
-                            Button {
-                                text: "ANC";
-                                enabled: AppState.noise-mode != 1;
-                                clicked => { root.noise-changed(1); }
-                            }
-                            Button {
-                                text: "Outdoor";
-                                enabled: AppState.noise-mode != 2;
-                                clicked => { root.noise-changed(2); }
-                            }
-                            Button {
-                                text: "Transparency";
-                                enabled: AppState.noise-mode != 3;
-                                clicked => { root.noise-changed(3); }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button {
+                                    text: "Noisy";
+                                    enabled: AppState.noise-mode != 4;
+                                    clicked => { root.noise-changed(4); }
+                                }
+                                Button {
+                                    text: "Wind";
+                                    enabled: AppState.noise-mode != 5;
+                                    clicked => { root.noise-changed(5); }
+                                }
+                                Button {
+                                    text: "Transparency";
+                                    enabled: AppState.noise-mode != 6;
+                                    clicked => { root.noise-changed(6); }
+                                }
                             }
                         }
                     }
