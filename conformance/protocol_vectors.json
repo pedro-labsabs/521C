@@ -140,14 +140,74 @@
       "expectHex": "ff03fe012f"
     },
     {
-      "name": "anc-indoor-level2",
+      "name": "anc-off",
       "blocks": [
         {
           "cmd": 23,
-          "paramsHex": "020250"
+          "paramsHex": "020000"
         }
       ],
-      "expectHex": "ff051703020250"
+      "expectHex": "ff051703020000"
+    },
+    {
+      "name": "anc-indoor",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "010102"
+        }
+      ],
+      "expectHex": "ff051703010102"
+    },
+    {
+      "name": "anc-commuting",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "010202"
+        }
+      ],
+      "expectHex": "ff051703010202"
+    },
+    {
+      "name": "anc-noisy",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "010302"
+        }
+      ],
+      "expectHex": "ff051703010302"
+    },
+    {
+      "name": "anc-wind",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "010402"
+        }
+      ],
+      "expectHex": "ff051703010402"
+    },
+    {
+      "name": "anc-adaptive",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "010502"
+        }
+      ],
+      "expectHex": "ff051703010502"
+    },
+    {
+      "name": "transparency",
+      "blocks": [
+        {
+          "cmd": 23,
+          "paramsHex": "030204"
+        }
+      ],
+      "expectHex": "ff051703030204"
     },
     {
       "name": "multi-block",

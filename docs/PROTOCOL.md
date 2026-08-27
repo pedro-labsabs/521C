@@ -127,15 +127,25 @@ Destructive and never automated: `0x01` reset default, `0x02` clear pairing, `0x
 
 ### ANC scenes (0x17)
 
-| mode | sub | meaning |
-| --- | --- | --- |
-| 0x00 | 0x00 | Off |
-| 0x02 | 1–3 | Silent / indoor |
-| 0x03 | 1–3 | Working / commuting |
-| 0x04 | 1–3 | Noisy |
-| 0x0A | 1–7 | Transparency |
+Hardware-validated on the live HT08 (BLE GATT, 2026-08-27). The device ACKs
+each write through a 0x17 notification carrying the resulting state; wind,
+adaptive and transparency normalize `noiseValue` to 0 in the ACK.
 
-Wind reduction: **requires protocol research**.
+| mode | subScene | noiseValue | meaning |
+| --- | --- | --- | --- |
+| 0x02 | 0x00 | 0x00 | Off |
+| 0x01 | 0x01 | 0x02 | ANC indoor / silent |
+| 0x01 | 0x02 | 0x02 | ANC commuting / working |
+| 0x01 | 0x03 | 0x02 | ANC noisy environment |
+| 0x01 | 0x04 | 0x02 | ANC wind reduction |
+| 0x01 | 0x05 | 0x02 | Adaptive ANC |
+| 0x03 | 0x02 | 0x04 | Transparency |
+
+Adjustable level axes are not validated on HT08: `subScene` is the scene
+selector and each scene uses one fixed payload. The legacy table (mode
+0x02/0x03/0x04 with level subs, 0x0A transparency) came from public app
+dumps and was falsified on hardware; 0x0C NoiseCancelMode writes are
+ignored by the device.
 
 ## Firmware
 

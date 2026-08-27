@@ -125,11 +125,12 @@ describe("central write policy · experimental opt-in", () => {
     expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, frame).ok).toBe(true);
   });
 
-  it("denies enabling adaptive ANC without opt-in but allows the supported ANC flow", () => {
-    // setNoise("adaptive") writes EnvAdaptation on -> requires opt-in.
+  it("denies enabling experimental EnvAdaptation without opt-in but allows disabling it", () => {
+    // 0x32 EnvAdaptation stays experimental in the ledger (unvalidated on the
+    // live HT08; the validated adaptive path is 0x17 payload (1,5,2)). The
+    // policy itself must still gate enable and allow safe disable.
     const enable = encodeCommand(Cmd.EnvAdaptation, [0x01]);
     expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, enable).ok).toBe(false);
-    // setNoise(non-adaptive) writes EnvAdaptation off -> allowed.
     const disable = encodeCommand(Cmd.EnvAdaptation, [0x02]);
     expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, disable).ok).toBe(true);
   });

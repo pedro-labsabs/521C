@@ -159,6 +159,15 @@ export type HubActions = {
 };
 
 let transport: QcyTransport = new MockTransport();
+
+/**
+ * Test-only accessor for the active transport instance (used to inject
+ * deterministic failures into the mock boundary). Not part of the public
+ * application API; UI and CLI must go through the store actions.
+ */
+export function transportForTests(): QcyTransport {
+  return transport;
+}
 /**
  * Per-connection command scheduler (issue #10). Serializes device writes and coalesces
  * high-frequency latest-value controls. Recreated on connect; queued work is cancelled
@@ -186,33 +195,55 @@ function persistFrom(get: () => HubState) {
   });
 }
 
-function noiseToScene(mode: NoiseUiMode, level: number): { scene: AncScene; simple: number; adaptive: boolean } {
-  const lv = Math.max(1, Math.min(3, level));
+/**
+ * Hardware-validated HT08 ANC table (live BLE GATT session, 2026-08-27):
+ * mode 1 = ANC family with subScene selecting the scene, mode 2 = off,
+ * mode 3 = transparency. Payloads are fixed per mode; the device ACKs the
+ * resulting state via 0x17 notify (wind/adaptive/transparency normalize
+ * noiseValue to 0). Adjustable levels are not validated on this model.
+ */
+function noiseToScene(mode: NoiseUiMode): AncScene {
   switch (mode) {
     case "off":
-      return { scene: { mode: 0x00, subScene: 0x00, noiseValue: 0 }, simple: 0x00, adaptive: false };
+      return { mode: 0x02, subScene: 0x00, noiseValue: 0x00 };
     case "anc":
-      return { scene: { mode: 0x02, subScene: lv, noiseValue: 80 }, simple: 0x01, adaptive: false };
-    case "adaptive":
-      return { scene: { mode: 0x02, subScene: lv, noiseValue: 80 }, simple: 0x01, adaptive: true };
     case "indoor":
-      return { scene: { mode: 0x02, subScene: lv, noiseValue: 70 }, simple: 0x01, adaptive: false };
+      return { mode: 0x01, subScene: 0x01, noiseValue: 0x02 };
     case "commuting":
-      return { scene: { mode: 0x03, subScene: lv, noiseValue: 90 }, simple: 0x01, adaptive: false };
+      return { mode: 0x01, subScene: 0x02, noiseValue: 0x02 };
     case "noisy":
-      return { scene: { mode: 0x04, subScene: lv, noiseValue: 110 }, simple: 0x01, adaptive: false };
+      return { mode: 0x01, subScene: 0x03, noiseValue: 0x02 };
+    case "wind":
+      return { mode: 0x01, subScene: 0x04, noiseValue: 0x02 };
+    case "adaptive":
+      return { mode: 0x01, subScene: 0x05, noiseValue: 0x02 };
     case "transparency":
-      return { scene: { mode: 0x0a, subScene: Math.max(1, Math.min(7, level)), noiseValue: 0 }, simple: 0x03, adaptive: false };
+      return { mode: 0x03, subScene: 0x02, noiseValue: 0x04 };
   }
 }
 
 export function currentNoiseUi(device: DeviceLiveState): NoiseUiMode {
-  if (device.adaptive) return "adaptive";
+  // Decode from the hardware-validated 0x17 AncSetting state (mode, subScene).
+  const { mode, subScene } = device.ancScene;
+  if (mode === 0x02) return "off";
+  if (mode === 0x03) return "transparency";
+  if (mode === 0x01) {
+    switch (subScene) {
+      case 0x02:
+        return "commuting";
+      case 0x03:
+        return "noisy";
+      case 0x04:
+        return "wind";
+      case 0x05:
+        return "adaptive";
+      default:
+        return "anc";
+    }
+  }
+  // Legacy 0x0C-based fallback for profiles that still report noiseMode.
   if (device.noiseMode === 0x00) return "off";
-  if (device.noiseMode === 0x03 || device.ancScene.mode === 0x0a) return "transparency";
-  if (device.ancScene.mode === 0x03) return "commuting";
-  if (device.ancScene.mode === 0x04) return "noisy";
-  if (device.noiseMode === 0x01) return "anc";
+  if (device.noiseMode === 0x03) return "transparency";
   return "anc";
 }
 
@@ -445,19 +476,15 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     await transport.disconnect();
   },
 
-  setNoise: async (mode, level) => {
-    const lv = level ?? (mode === "transparency" ? get().device.ancScene.subScene : get().device.ancScene.subScene);
-    const mapped = noiseToScene(mode, lv);
+  setNoise: async (mode, _level) => {
+    // Live HT08 evidence (2026-08-27): ANC state is set through 0x17
+    // AncSetting with fixed per-mode payloads (see noiseToScene). 0x0C
+    // NoiseCancelMode is ignored by the device and 0x32 EnvAdaptation is
+    // unvalidated on HT08, so the default flow issues only 0x17. The level
+    // argument is kept for API compatibility but is not hardware-validated.
+    const scene = noiseToScene(mode);
     return guard(async () => {
-      // Live HT08 evidence (2026-08-27): 0x0C NoiseCancelMode writes are
-      // ignored by the device; ANC state is set through 0x17 AncSetting.
-      // The falsified 0x0C write is no longer issued by the default flow.
-      if (mapped.adaptive) {
-        await transport.write(set.envAdaptation("on"));
-      } else {
-        await transport.write(set.envAdaptation("off"));
-        await transport.write(set.ancSetting(mapped.scene));
-      }
+      await transport.write(set.ancSetting(scene));
     }, { key: "noise", coalesce: true });
   },
 

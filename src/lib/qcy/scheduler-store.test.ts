@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { useHub } from "./hub-store";
+import { transportForTests, useHub } from "./hub-store";
 import type { SmartProfile } from "./smart-profiles";
+import { MockTransport } from "./transport";
 
 describe("applyProfile structured results (issue #10)", () => {
   beforeAll(async () => {
@@ -25,28 +26,36 @@ describe("applyProfile structured results (issue #10)", () => {
   });
 
   it("flags the failed step and still reports the rest on partial failure", async () => {
-    // Adaptive ANC uses experimental opcode 0x32, which is denied without the
-    // session opt-in -> the noise step fails while the others still apply.
-    const adaptive: SmartProfile = {
-      id: "test-adaptive",
-      name: "Test Adaptive",
+    // ANC writes are hardware-validated 0x17 now (no policy-driven failure left
+    // in the default flow), so the failure is injected deterministically at the
+    // mock transport boundary: opcode 0x17 rejects -> the noise step fails
+    // while the other steps still apply.
+    const fixture: SmartProfile = {
+      id: "test-partial",
+      name: "Test Partial",
       description: "partial failure fixture",
       builtin: false,
-      noise: "adaptive",
+      noise: "anc",
       ancLevel: 2,
       transparencyLevel: 4,
       gameMode: true,
       eqId: "flat",
       wearDetection: true,
     };
-    useHub.getState().saveCustomProfile(adaptive);
-    const result = await useHub.getState().applyProfile("test-adaptive");
-    expect(result).not.toBeNull();
-    expect(result!.ok).toBe(false);
-    const noise = result!.steps.find((s) => s.step === "noise");
-    expect(noise?.ok).toBe(false);
-    const game = result!.steps.find((s) => s.step === "gameMode");
-    expect(game?.ok).toBe(true);
+    useHub.getState().saveCustomProfile(fixture);
+    const t = transportForTests() as MockTransport;
+    t.failOpcode = 0x17;
+    try {
+      const result = await useHub.getState().applyProfile("test-partial");
+      expect(result).not.toBeNull();
+      expect(result!.ok).toBe(false);
+      const noise = result!.steps.find((s) => s.step === "noise");
+      expect(noise?.ok).toBe(false);
+      const game = result!.steps.find((s) => s.step === "gameMode");
+      expect(game?.ok).toBe(true);
+    } finally {
+      t.failOpcode = null;
+    }
   });
 
   it("returns null for an unknown profile id", async () => {
