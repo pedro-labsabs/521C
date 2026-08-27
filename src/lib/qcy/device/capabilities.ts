@@ -128,18 +128,18 @@ export const HT08_CAPABILITIES: DeviceCapabilities = {
   },
   ancOff: {
     hardware: "supported",
-    protocol: "supported",
+    protocol: "unknown",
     implementation: "implemented",
-    write: "writable",
-    note: "0x0C mode 0x00 / 0x17",
+    write: "experimental",
+    note: "0x0C ignored by live HT08 unit (2026-08-27); confirmed path is 0x17 payload (2,0,0). Remap pending.",
     opcode: 0x0c,
   },
   ancOn: {
     hardware: "supported",
-    protocol: "supported",
+    protocol: "unknown",
     implementation: "implemented",
-    write: "writable",
-    note: "0x0C mode 0x01",
+    write: "experimental",
+    note: "0x0C ignored by live HT08 unit (2026-08-27); confirmed path is 0x17 payload (1,1,2). Remap pending.",
     opcode: 0x0c,
   },
   ancAdaptive: {
@@ -191,10 +191,10 @@ export const HT08_CAPABILITIES: DeviceCapabilities = {
   },
   transparency: {
     hardware: "supported",
-    protocol: "supported",
+    protocol: "unknown",
     implementation: "implemented",
-    write: "writable",
-    note: "0x0C mode 0x03 / 0x17 mode 0x0A",
+    write: "experimental",
+    note: "0x0C ignored by live HT08 unit (2026-08-27); confirmed path is 0x17 payload (3,2,4). Remap pending.",
     opcode: 0x0c,
   },
   transparencyLevels: {

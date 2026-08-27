@@ -195,13 +195,14 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       opcode: 0x0c,
       name: "NoiseCancelMode",
       evidenceClass: "protocol-doc",
-      trustLevel: "write-supported",
+      trustLevel: "write-experimental",
       observedModel: "HT08",
       firmware: null,
       readWrite: "write",
-      payloadConfidence: "high",
+      payloadConfidence: "low",
     capability: "ancOn",
-    notes: "Simple noise-cancel mode (off/ANC/outdoor/transparency).",
+    notes:
+      "Simple noise-cancel mode (off/ANC/outdoor/transparency). Live HT08 test unit ignored 0x0C writes on 2026-08-27 (no ACK, no audible effect) while 0x17 AncSetting writes executed; demoted pending cross-unit evidence.",
     },
   ],
   [
@@ -294,14 +295,15 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
     {
       opcode: 0x17,
       name: "AncSetting",
-      evidenceClass: "protocol-doc",
+      evidenceClass: "hardware-capture",
       trustLevel: "write-supported",
       observedModel: "HT08",
       firmware: null,
       readWrite: "write",
       payloadConfidence: "high",
     capability: "ancLevels",
-    notes: "ANC scene: mode, subScene, noiseValue.",
+    notes:
+      "ANC scene: mode, subScene, noiseValue. Confirmed on live HT08 over BLE GATT 2026-08-27: writes to char 00001001 of service 0000a001 executed with audible effect and notify ACK echoing the resulting state. Confirmed payloads: off=(2,0,0), indoor/ANC=(1,1,2), transparency=(3,2,4) ACKed as (3,2,0). Touch-sensor changes produced (1,3,2)=noisy and (2,0,0)=off. Cross-checked with OpenQCY mode table: commuting=(1,2,2), noisy=(1,3,2), wind=(1,4,2), adaptive=(1,5,2) (individual confirmation pending).",
     },
   ],
   [
@@ -433,12 +435,12 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
     {
       opcode: 0x28,
       name: "AncResult",
-      evidenceClass: "community-catalog",
-      trustLevel: "catalog-only",
-      observedModel: null,
+      evidenceClass: "hardware-capture",
+      trustLevel: "read",
+      observedModel: "HT08",
       firmware: null,
       readWrite: "read",
-      payloadConfidence: "unknown",
+      payloadConfidence: "medium",
     },
   ],
   [

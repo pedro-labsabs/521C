@@ -47,7 +47,7 @@ fn host_features_never_claim_device_support_or_writes() {
 #[test]
 fn proven_ht08_controls_are_interactable() {
     let profile = ht08_profile();
-    for id in ["ancOff", "ancOn", "gameMode", "deviceEq", "sleepMode"] {
+    for id in ["gameMode", "deviceEq", "sleepMode"] {
         let cap = profile.get(id).expect("control entry");
         assert!(is_writable(cap), "{id} should be a supported write");
         assert!(can_interact(cap), "{id} should be interactable");
@@ -58,7 +58,16 @@ fn proven_ht08_controls_are_interactable() {
 #[test]
 fn experimental_controls_require_opt_in_and_are_labelled() {
     let profile = ht08_profile();
-    for id in ["ancAdaptive", "spatialAudio", "ldacToggle"] {
+    // ancOff/ancOn/transparency moved here after live HT08 evidence
+    // (2026-08-27) falsified the 0x0C NoiseCancelMode writes they used.
+    for id in [
+        "ancAdaptive",
+        "spatialAudio",
+        "ldacToggle",
+        "ancOff",
+        "ancOn",
+        "transparency",
+    ] {
         let cap = profile.get(id).expect("experimental entry");
         assert!(is_experimental_write(cap), "{id} should be experimental");
         assert!(can_interact(cap), "{id} is interactable behind opt-in");

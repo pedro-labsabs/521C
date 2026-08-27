@@ -449,12 +449,13 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     const lv = level ?? (mode === "transparency" ? get().device.ancScene.subScene : get().device.ancScene.subScene);
     const mapped = noiseToScene(mode, lv);
     return guard(async () => {
+      // Live HT08 evidence (2026-08-27): 0x0C NoiseCancelMode writes are
+      // ignored by the device; ANC state is set through 0x17 AncSetting.
+      // The falsified 0x0C write is no longer issued by the default flow.
       if (mapped.adaptive) {
         await transport.write(set.envAdaptation("on"));
-        await transport.write(set.noiseMode(0x01));
       } else {
         await transport.write(set.envAdaptation("off"));
-        await transport.write(set.noiseMode(mapped.simple));
         await transport.write(set.ancSetting(mapped.scene));
       }
     }, { key: "noise", coalesce: true });

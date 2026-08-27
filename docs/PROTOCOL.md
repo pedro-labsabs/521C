@@ -59,34 +59,40 @@ do not edit the write policy allowlist by hand.
 
 ## Transport paths
 
-The `0xFF` framing below is transport-agnostic. Two control paths exist:
+The `0xFF` framing below is transport-agnostic. QCY dual-mode earbuds can
+expose two identities, and the control path is model-specific:
 
 | Path | Where it works | Status |
 | --- | --- | --- |
-| BLE GATT (`0000a001`) | Android (official app; vendor GATT is exposed there), Web Bluetooth | implemented (`bluez.rs` for the GATT API shape, web transport for browsers) |
-| SPP/RFCOMM (`00001101`, same framing over a byte stream) | Linux/BlueZ | implemented behind the same `Transport` contract (`rfcomm.rs`, issue #50); HT08 on-wire confirmation pending |
+| BLE GATT (`0000a001`) on the **BLE control identity** | Android (official app), Linux/BlueZ (HT08-confirmed), Web Bluetooth | HT08-confirmed on Linux (issue #50): reads, ANC writes with ACK, coexistence with BR/EDR audio |
+| SPP/RFCOMM (`00001101`, same framing over a byte stream) | model-dependent | generic backend implemented behind the same `Transport` contract (`rfcomm.rs`, PR #51); **not** the HT08 control path |
 
-Direct observation on the HT08 test unit (`84:AC:60:62:69:DA`, BlueZ 5.72,
-issue #50): BlueZ caches `00001101` (Serial Port) for the earbuds and never
-resolves `0000a001`; while connected for A2DP audio the BLE identity is asleep,
-and the earbuds auto-reconnect audio aggressively. Independent
-reverse-engineering projects (Jieli RCSP over SPP; see issue #50 for
-provenance) converge on the same conclusion. Consequences:
+Live HT08 findings (issues #50/#52, 2026-08-27):
 
-- On Linux the control channel is SPP/RFCOMM. It rides the same BR/EDR ACL as
-  A2DP audio, so control coexists with audio.
-- Reads over SPP are `RequestData(0xFE)` exchanges: battery is
-  `FF 03 FE 01 2F` answered by a `0x2F` block; version is `FF 03 FE 01 30`
-  answered by a `0x30` block. `0xFE` is a read-back request, not a state
-  mutation, so the write policy authorizes it even for read-only devices.
+- The earbuds expose a BR/EDR audio identity (`84:AC:60:62:69:DA`) and a
+  separate BLE control identity (`C4:AC:60:62:69:DB`, advertisement
+  manufacturer company ID `0x521C`, random address type). BlueZ resolves the
+  vendor GATT service `0000a001` on the LE identity; scanning only the audio
+  MAC is what hid it.
+- Confirmed over BLE GATT on Linux (no root): battery/version reads, and ANC
+  writes to char `00001001` (write-without-response) with notify ACKs on
+  `00001002`. LE control and BR/EDR audio hold simultaneously.
+- The control identity advertises intermittently; after bonding, the LE link
+  must be kept resident (reconnect on demand fails outside advertisement
+  windows). See `docs/devices/HT08.md` and issue #52 for the bootstrap model.
+- HT08 SPP channel 1 ("COM5") only byte-ACKs frames and executes nothing;
+  channels 4/5 are silent. SPP remains a valid generic path only for models
+  whose evidence points there.
+- Reads over SPP (where SPP applies) are `RequestData(0xFE)` exchanges:
+  battery `FF 03 FE 01 2F`, version `FF 03 FE 01 30`. `0xFE` is a read-back
+  request, not a state mutation, so the write policy authorizes it even for
+  read-only devices. On HT08 over GATT, direct characteristic reads are the
+  observed read path.
 - SPP has no GATT characteristics: unframed direct writes (`0000000B`,
   `0000000D`) do not exist on that path; EQ and key-function travel as framed
   opcodes.
-- The RFCOMM channel is resolved via SDP for `00001101` (expected channel 1;
-  corroborated by independent Jieli-earbud projects). HT08-specific channel
-  and on-wire behavior remain pending hardware confirmation — see
-  `docs/devices/HT08.md`. `scripts/sdp-rfcomm-channel.py` is the read-only
-  Stage-1 query tool.
+- `scripts/sdp-rfcomm-channel.py` is the read-only Stage-1 SDP query tool for
+  the SPP path.
 
 ## Frame
 
