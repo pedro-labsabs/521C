@@ -123,6 +123,18 @@ fn apply_snapshot(state: &AppState, snapshot: &DeviceSnapshot) {
         }
         None => state.set_has_battery(false),
     }
+    // -1 = unknown (no write this session): every button stays enabled.
+    let noise_mode = match snapshot.noise {
+        None => -1,
+        Some(qcy_app::core::SimpleNoise::Off) => 0,
+        Some(qcy_app::core::SimpleNoise::Anc) => 1,
+        Some(qcy_app::core::SimpleNoise::Adaptive) => 2,
+        Some(qcy_app::core::SimpleNoise::Commuting) => 3,
+        Some(qcy_app::core::SimpleNoise::Noisy) => 4,
+        Some(qcy_app::core::SimpleNoise::Wind) => 5,
+        Some(qcy_app::core::SimpleNoise::Transparency) => 6,
+    };
+    state.set_noise_mode(noise_mode);
 }
 
 fn build_transport(mock: bool) -> Result<Box<dyn Transport + Send>, String> {
@@ -364,10 +376,15 @@ fn main() {
     {
         let sender = handle.commands.clone();
         app.on_noise_changed(move |mode| {
+            // Hardware-validated HT08 ANC scenes (#54): 0x17 AncSetting
+            // payloads, one fixed scene per mode.
             let noise = match mode {
                 1 => SimpleNoise::Anc,
-                2 => SimpleNoise::Outdoor,
-                3 => SimpleNoise::Transparency,
+                2 => SimpleNoise::Adaptive,
+                3 => SimpleNoise::Commuting,
+                4 => SimpleNoise::Noisy,
+                5 => SimpleNoise::Wind,
+                6 => SimpleNoise::Transparency,
                 _ => SimpleNoise::Off,
             };
             let _ = sender.send(AppCommand::SetNoise(noise));

@@ -24,6 +24,7 @@ use qcy_host::mpris::MediaStatus;
 use qcy_host::system_eq::SystemEqStatus;
 use qcy_protocol::packet::encode_command;
 use qcy_protocol::{BatteryState, Cmd};
+use qcy_transport::policy::CHAR_SETTINGS_NOTIFY;
 use qcy_transport::{normalize_address, DiscoveredDevice, Transport, TransportError};
 
 /// Characteristic UUIDs used for proven reads (see docs/PROTOCOL.md).
@@ -54,30 +55,50 @@ pub struct DeviceSnapshot {
     pub rssi: Option<i16>,
     pub battery: Option<BatterySnapshot>,
     pub firmware: Option<String>,
+    /// Last applied ANC scene. `None` until the first successful write in this
+    /// session (the device reports ANC state only through notifications, which
+    /// the native transport does not surface yet).
+    pub noise: Option<SimpleNoise>,
 }
 
-/// Simple noise-cancel modes mapped to `NoiseCancelMode` (0x0C).
+/// Noise-control modes mapped to the hardware-validated `AncSetting` (0x17)
+/// scene table (live HT08 evidence, #50/#52/#54).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimpleNoise {
     Off,
+    /// ANC indoor — validated payload (1,1,2).
     Anc,
-    Outdoor,
+    /// Adaptive ANC — validated payload (1,5,2), ACK (1,5,0).
+    Adaptive,
+    /// ANC commuting/working — validated payload (1,2,2).
+    Commuting,
+    /// ANC noisy environment — validated payload (1,3,2).
+    Noisy,
+    /// ANC wind reduction — validated payload (1,4,2), ACK (1,4,0).
+    Wind,
+    /// Transparency — validated payload (3,2,4), ACK (3,2,0).
     Transparency,
 }
 
 impl SimpleNoise {
-    fn byte(self) -> u8 {
+    /// Hardware-validated HT08 ANC scene (live evidence, #50/#52/#54):
+    /// `[mode, subScene, noiseValue]` for opcode 0x17 AncSetting.
+    fn scene(self) -> (u8, u8, u8) {
         match self {
-            SimpleNoise::Off => 0x00,
-            SimpleNoise::Anc => 0x01,
-            SimpleNoise::Outdoor => 0x02,
-            SimpleNoise::Transparency => 0x03,
+            SimpleNoise::Off => (0x02, 0x00, 0x00),
+            SimpleNoise::Anc => (0x01, 0x01, 0x02),
+            SimpleNoise::Adaptive => (0x01, 0x05, 0x02),
+            SimpleNoise::Commuting => (0x01, 0x02, 0x02),
+            SimpleNoise::Noisy => (0x01, 0x03, 0x02),
+            SimpleNoise::Wind => (0x01, 0x04, 0x02),
+            SimpleNoise::Transparency => (0x03, 0x02, 0x04),
         }
     }
 }
 
-/// ANC scene selection mapped to `AncSetting` (0x17): mode 0x02/0x03/0x04 with a
-/// 1-3 sub-scene, or transparency 0x0A with a 1-7 level.
+/// Raw ANC scene selection mapped to `AncSetting` (0x17) with the
+/// hardware-validated `[mode, subScene, noiseValue]` table (see
+/// `SimpleNoise::scene`; this struct exposes the raw bytes for advanced use).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AncScene {
     pub mode: u8,
@@ -184,6 +205,10 @@ pub struct SupervisorConfig {
     pub tick: std::time::Duration,
     /// While connected, check the link every N ticks.
     pub link_check_every_ticks: u32,
+    /// While connected, refresh battery/firmware status every N ticks. This is
+    /// also the GATT keepalive: periodic proven reads prevent the earbuds from
+    /// classifying the LE link as idle and dropping it.
+    pub status_refresh_every_ticks: u32,
     /// Cooldown between automatic re-bootstrap attempts after link loss.
     pub rebootstrap_cooldown: std::time::Duration,
 }
@@ -193,7 +218,46 @@ impl Default for SupervisorConfig {
         Self {
             tick: std::time::Duration::from_secs(1),
             link_check_every_ticks: 5,
+            status_refresh_every_ticks: 30,
             rebootstrap_cooldown: std::time::Duration::from_secs(15),
+        }
+    }
+}
+
+/// Optional tracing for the resident-session supervisor and connection
+/// lifecycle, enabled with `QCY_CORE_TRACE=1`. Used to diagnose live-hardware
+/// session behavior without changing shipped behavior.
+fn trace(message: &str) {
+    if std::env::var_os("QCY_CORE_TRACE").is_some() {
+        eprintln!(
+            "521c-core: {message} (t={:.1}s)",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0)
+        );
+    }
+}
+
+/// Quiet status refresh used as the resident-session keepalive: updates the
+/// snapshot in place and never emits error events (a transient read failure
+/// must not spam the UI; link loss is detected via `is_connected`).
+fn keepalive_refresh(transport: &mut Box<dyn Transport + Send>, snapshot: &mut DeviceSnapshot) {
+    if let Ok(bytes) = transport.read(CHAR_BATTERY) {
+        if let Some(state) = BatteryState::decode(&bytes) {
+            snapshot.battery = Some(BatterySnapshot {
+                left: state.left.level,
+                right: state.right.level,
+                case: state.case.level,
+                charging_left: state.left.charging,
+                charging_right: state.right.charging,
+                charging_case: state.case.charging,
+            });
+        }
+    }
+    if let Ok(bytes) = transport.read(CHAR_VERSION) {
+        if bytes.len() >= 3 {
+            snapshot.firmware = Some(format!("{}.{}.{}", bytes[0], bytes[1], bytes[2]));
         }
     }
 }
@@ -380,6 +444,13 @@ impl AppCore {
                     transport
                         .connect(&address)
                         .map_err(|e| format!("connect failed: {e}"))?;
+                    // Resident-session keepalive (#54): the HT08 firmware drops
+                    // fully idle LE links (live evidence: a notify-subscribed
+                    // session survived >1h while an idle app session dropped in
+                    // under a minute and looped re-bootstrap). Subscribing the
+                    // settings notify keeps the GATT session established and the
+                    // device's spontaneous notifications acknowledged.
+                    let _ = transport.subscribe(CHAR_SETTINGS_NOTIFY);
                     snapshot.connected = true;
                     snapshot.address = address.clone();
                     if let Some(dev) = last_discovered.iter().find(|d| d.address == address) {
@@ -400,7 +471,10 @@ impl AppCore {
 
                 loop {
                     let cmd = match cmd_rx.recv_timeout(supervisor.tick) {
-                        Ok(cmd) => Some(cmd),
+                        Ok(cmd) => {
+                            trace(&format!("command received: {cmd:?}"));
+                            Some(cmd)
+                        }
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => None,
                     };
@@ -413,6 +487,7 @@ impl AppCore {
                                     match transport.is_connected() {
                                         Ok(true) => {}
                                         Ok(false) => {
+                                            trace("link loss detected by supervisor");
                                             snapshot.connected = false;
                                             let addr = snapshot.address.clone();
                                             emit(AppEvent::SessionLost { address: addr });
@@ -425,6 +500,15 @@ impl AppCore {
                                         ))),
                                     }
                                 }
+                                // Keepalive + fresh UI data: periodic proven
+                                // reads keep the LE link busy enough that the
+                                // earbuds do not drop it as idle.
+                                if tick_count
+                                    .is_multiple_of(supervisor.status_refresh_every_ticks.max(1))
+                                {
+                                    keepalive_refresh(&mut transport, &mut snapshot);
+                                    emit(AppEvent::StateChanged(snapshot.clone()));
+                                }
                             } else if supervising && !snapshot.connected {
                                 // Re-bootstrap mode: retry the connection with a
                                 // cooldown until the user disconnects. Errors are
@@ -435,6 +519,7 @@ impl AppCore {
                                 if due {
                                     last_rebootstrap = Some(std::time::Instant::now());
                                     let address = snapshot.address.clone();
+                                    trace(&format!("re-bootstrap attempt for {address}"));
                                     match do_connect(
                                         &mut transport,
                                         &mut snapshot,
@@ -443,6 +528,7 @@ impl AppCore {
                                         address.clone(),
                                     ) {
                                         Ok(()) => {
+                                            trace("re-bootstrap succeeded");
                                             last_rebootstrap_error = None;
                                             emit(AppEvent::SessionRestored { address });
                                             emit(AppEvent::StateChanged(snapshot.clone()));
@@ -480,6 +566,7 @@ impl AppCore {
                                     // A user-established session becomes the
                                     // resident session (#54): the supervisor
                                     // holds it and re-bootstraps on link loss.
+                                    trace("user connect succeeded; supervisor armed");
                                     supervising = true;
                                     emit(AppEvent::StateChanged(snapshot.clone()));
                                 }
@@ -542,6 +629,7 @@ impl AppCore {
                         Some(AppCommand::Disconnect) => {
                             // Explicit user disconnect disarms the resident
                             // session; no background re-bootstrap after it.
+                            trace("user disconnect; supervisor disarmed");
                             supervising = false;
                             let _ = transport.disconnect();
                             snapshot = DeviceSnapshot::default();
@@ -552,11 +640,25 @@ impl AppCore {
                             emit(AppEvent::StateChanged(snapshot.clone()));
                         }
                         Some(AppCommand::SetNoise(mode)) => {
-                            match encode_command(Cmd::NoiseCancelMode as u8, &[mode.byte()]) {
+                            // Live HT08 evidence (#50/#52): 0x0C NoiseCancelMode
+                            // is ignored by the device; ANC state is set through
+                            // 0x17 AncSetting with the validated scene table.
+                            let (m, sub, noise) = mode.scene();
+                            match encode_command(Cmd::AncSetting as u8, &[m, sub, noise]) {
                                 Ok(frame) => match write_frame(&mut transport, frame) {
-                                    Ok(()) => emit(AppEvent::Info(format!(
-                                        "noise mode set to {mode:?}"
-                                    ))),
+                                    Ok(()) => {
+                                        // Record the applied scene so the UI can
+                                        // reflect it. The device confirms writes
+                                        // through notify ACKs (same frame), which
+                                        // the native transport does not surface
+                                        // yet; a successful GATT write is the
+                                        // best available signal.
+                                        snapshot.noise = Some(mode);
+                                        emit(AppEvent::Info(format!(
+                                            "noise mode set to {mode:?}"
+                                        )));
+                                        emit(AppEvent::StateChanged(snapshot.clone()));
+                                    }
                                     Err(event) => emit(event),
                                 },
                                 Err(e) => emit(AppEvent::Error(format!("encode failed: {e:?}"))),
