@@ -19,23 +19,41 @@ const CHAR_VERSION: &str = "00000007-0000-1000-8000-00805f9b34fb";
 
 struct Options {
     bluez: bool,
+    spp: bool,
     adapter: String,
     device: Option<String>,
+    /// RFCOMM channel override for `--spp` (default 1).
+    channel: Option<u8>,
+    /// Explicit user attestation that the selected device's model is known.
+    /// Required for writes over `--spp`, where no advertised name can prove
+    /// the model. Never persisted; applies to this invocation only.
+    attest: bool,
 }
 
 fn parse_opts<I: Iterator<Item = String>>(args: &mut I) -> (Options, Vec<String>) {
     let mut opts = Options {
         bluez: false,
+        spp: false,
         adapter: "hci0".to_string(),
         device: None,
+        channel: None,
+        attest: false,
     };
     let mut rest = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bluez" => opts.bluez = true,
-            "--mock" => opts.bluez = false,
+            "--spp" => opts.spp = true,
+            "--mock" => {
+                opts.bluez = false;
+                opts.spp = false;
+            }
             "--adapter" => opts.adapter = args.next().unwrap_or_else(|| "hci0".into()),
             "--device" => opts.device = args.next(),
+            "--channel" => {
+                opts.channel = args.next().and_then(|c| c.parse::<u8>().ok());
+            }
+            "--attest" => opts.attest = true,
             _ => {
                 rest.push(a);
                 rest.extend(args);
@@ -47,11 +65,31 @@ fn parse_opts<I: Iterator<Item = String>>(args: &mut I) -> (Options, Vec<String>
 }
 
 fn build_transport(opts: &Options) -> Result<Box<dyn Transport>, TransportError> {
-    if opts.bluez {
+    if opts.spp {
+        build_spp(opts)
+    } else if opts.bluez {
         build_bluez(opts)
     } else {
         Ok(Box::new(MockTransport::new(WritePolicy::ht08())))
     }
+}
+
+/// SPP/RFCOMM backend (issue #50): the control path BlueZ actually exposes for
+/// QCY dual-mode earbuds on Linux. Raw `AF_BLUETOOTH` socket, no root needed.
+fn build_spp(opts: &Options) -> Result<Box<dyn Transport>, TransportError> {
+    let mut t = qcy_transport::rfcomm::RfcommTransport::new(
+        Box::new(qcy_transport::rfcomm::RawRfcommSocketFactory::default()),
+        WritePolicy::ht08(),
+    );
+    if let Some(ch) = opts.channel {
+        if !(1..=30).contains(&ch) {
+            return Err(TransportError::InvalidArgument(format!(
+                "RFCOMM channel out of range: {ch}"
+            )));
+        }
+        t = t.with_channel(ch);
+    }
+    Ok(Box::new(t))
 }
 
 #[cfg(feature = "bluez")]
@@ -85,6 +123,42 @@ fn pick_device(
     }
 }
 
+/// Resolve the target device. SPP devices do not advertise (issue #50): the
+/// earbuds are already paired at the host level, so when the transport has no
+/// scan surface an explicit address is the selection. Model truth is preserved
+/// either way: the device stays read-only until proven or attested.
+fn resolve_device(
+    t: &mut Box<dyn Transport>,
+    wanted: Option<&str>,
+) -> Result<DiscoveredDevice, TransportError> {
+    let list = t.scan()?;
+    if !list.is_empty() {
+        return pick_device(&list, wanted);
+    }
+    let addr = wanted.ok_or_else(|| {
+        TransportError::NotFound("no QCY device discovered; pass --device <addr>".into())
+    })?;
+    Ok(DiscoveredDevice {
+        address: qcy_transport::normalize_address(addr),
+        name: "paired device (no advertisement)".to_string(),
+        rssi: None,
+        model_known: false,
+    })
+}
+
+/// Connect and apply the per-invocation model attestation, if requested.
+fn attach(
+    t: &mut Box<dyn Transport>,
+    opts: &Options,
+    dev: &DiscoveredDevice,
+) -> Result<(), TransportError> {
+    t.connect(&dev.address)?;
+    if opts.attest {
+        t.attest_model_known();
+    }
+    Ok(())
+}
+
 fn battery_label(bytes: &[u8]) -> String {
     let cell = |b: Option<&u8>| match b {
         Some(v) => format!("{}%", v & 0x7f),
@@ -110,11 +184,17 @@ fn run() -> Result<(), TransportError> {
     let mut args = std::env::args().skip(1);
     let (opts, rest) = parse_opts(&mut args);
     let cmd = rest.first().cloned().unwrap_or_else(|| "help".into());
-    let backend = if opts.bluez { "bluez" } else { "mock" };
+    let backend = if opts.spp {
+        "spp"
+    } else if opts.bluez {
+        "bluez"
+    } else {
+        "mock"
+    };
 
     match cmd.as_str() {
         "help" | "-h" | "--help" => {
-            println!("521cctl [--mock|--bluez] [--adapter hci0] [--device <addr>] <command>");
+            println!("521cctl [--mock|--bluez|--spp] [--adapter hci0] [--device <addr>] [--channel n] [--attest] <command>");
             println!("  scan                     list candidate QCY devices");
             println!("  connect [<addr>]         connect and resolve characteristics");
             println!("  status                   connect + battery/firmware readout");
@@ -125,7 +205,13 @@ fn run() -> Result<(), TransportError> {
             println!("  media <status|play|pause|next|prev>   MPRIS media control");
             println!("  codec                                 host codec/sample-rate (unknown if unavailable)");
             println!("  system-eq <on|off|status> [gains...]  PipeWire System EQ");
-            println!("Mock is the deliberate default; --bluez targets a real device.");
+            println!("Mock is the deliberate default; --bluez targets BLE GATT and --spp targets");
+            println!(
+                "SPP/RFCOMM (the control path BlueZ exposes for QCY earbuds on Linux, issue #50)."
+            );
+            println!(
+                "--attest is explicit user attestation that the device model is known (writes)."
+            );
             println!("Independent. Not affiliated with QCY.");
         }
         "scan" => {
@@ -149,22 +235,20 @@ fn run() -> Result<(), TransportError> {
         }
         "connect" => {
             let mut t = build_transport(&opts)?;
-            let list = t.scan()?;
-            let dev = pick_device(
-                &list,
+            let dev = resolve_device(
+                &mut t,
                 rest.get(1).map(|s| s.as_str()).or(opts.device.as_deref()),
             )?;
-            t.connect(&dev.address)?;
+            attach(&mut t, &opts, &dev)?;
             println!("connected to {} ({}) via {backend}", dev.name, dev.address);
         }
         "status" | "battery" => {
             let mut t = build_transport(&opts)?;
-            let list = t.scan()?;
-            let dev = pick_device(&list, opts.device.as_deref())?;
-            if !dev.model_known {
+            let dev = resolve_device(&mut t, opts.device.as_deref())?;
+            if !dev.model_known && !opts.attest {
                 println!("note: model not proven; treating as read-only");
             }
-            t.connect(&dev.address)?;
+            attach(&mut t, &opts, &dev)?;
             let battery = t.read(CHAR_BATTERY)?;
             println!("{}  {}  {}", dev.name, dev.address, backend);
             println!("battery: {}", battery_label(&battery));
@@ -183,9 +267,8 @@ fn run() -> Result<(), TransportError> {
                 _ => 0x01,
             };
             let mut t = build_transport(&opts)?;
-            let list = t.scan()?;
-            let dev = pick_device(&list, opts.device.as_deref())?;
-            t.connect(&dev.address)?;
+            let dev = resolve_device(&mut t, opts.device.as_deref())?;
+            attach(&mut t, &opts, &dev)?;
             let frame = encode_command(Cmd::NoiseCancelMode as u8, &[v])
                 .map_err(|e| TransportError::InvalidArgument(format!("{e:?}")))?;
             t.write(&frame)?;
@@ -194,9 +277,8 @@ fn run() -> Result<(), TransportError> {
         "game-mode" => {
             let on = rest.get(1).map(|s| s.as_str()) != Some("off");
             let mut t = build_transport(&opts)?;
-            let list = t.scan()?;
-            let dev = pick_device(&list, opts.device.as_deref())?;
-            t.connect(&dev.address)?;
+            let dev = resolve_device(&mut t, opts.device.as_deref())?;
+            attach(&mut t, &opts, &dev)?;
             let frame = encode_command(Cmd::LowLatency as u8, &[if on { 0x01 } else { 0x02 }])
                 .map_err(|e| TransportError::InvalidArgument(format!("{e:?}")))?;
             t.write(&frame)?;

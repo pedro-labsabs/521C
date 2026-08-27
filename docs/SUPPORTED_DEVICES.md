@@ -49,6 +49,15 @@ earbud write) · **P** protocol known, app pending · **R** needs protocol resea
 | Codec status | Host | Read passively from BlueZ MediaTransport1 (codec/sample rate/profile); unknown when unavailable — never invented |
 | Firmware OTA | F | Not yet safely supported; no flash path sent |
 
+Linux control transport (issue #50): BlueZ does not expose the QCY vendor
+GATT service for these dual-mode earbuds, so the native path is SPP/RFCOMM
+(`00001101`) carrying the same `0xFF` framing — implemented in
+`native/crates/qcy-transport/src/rfcomm.rs` behind the same `Transport`
+contract and write policy (`521cctl --spp`). HT08 on-wire confirmation
+(SDP channel, first read, first allowlisted write) is pending; until it
+lands, the readiness above is exercised over the mock and GATT backends.
+The Web Bluetooth path keeps using GATT where the vendor service is exposed.
+
 Future models plug in as additional `QcyDeviceProfile` entries. Do not scatter
 `if model == "HT08"` through the UI. Host-side features (System EQ, Auto game mode, Codec status) are implemented in the
 native host layer (`native/crates/qcy-host`, issue #13); they are never presented as QCY

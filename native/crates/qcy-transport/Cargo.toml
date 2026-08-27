@@ -14,4 +14,9 @@ bluez = ["dep:zbus"]
 
 [dependencies]
 qcy-protocol = { path = "../qcy-protocol" }
+libc = "0.2"
 zbus = { version = "5", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

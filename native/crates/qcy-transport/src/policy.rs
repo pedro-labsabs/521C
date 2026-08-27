@@ -41,6 +41,12 @@ const EXPERIMENTAL_OPCODES: &[u8] = &[
 /// Destructive opcodes — never authorized for unattended automation.
 const DESTRUCTIVE_OPCODES: &[u8] = &[0x01, 0x02, 0x03];
 
+/// RequestData opcode: a read-back request, not a state mutation. Mirrors the
+/// TypeScript policy (`src/lib/qcy/policy.ts`), which authorizes it even for
+/// read-only devices so status/identification can be read. The SPP/RFCOMM
+/// transport (issue #50) depends on this: stream reads are `0xFE` frames.
+const REQUEST_DATA_OPCODE: u8 = 0xFE;
+
 /// Why a write was denied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denial {
@@ -125,15 +131,25 @@ impl WritePolicy {
     /// or experimental block past the policy, and an undecodable frame is
     /// denied before it can reach the wire.
     pub fn authorize_frame(&self, bytes: &[u8], experimental_opt_in: bool) -> Result<(), Denial> {
-        if self.read_only {
-            return Err(Denial::ReadOnlyDevice);
-        }
+        // Decode first: an undecodable frame is refused before any profile
+        // judgment, mirroring the TypeScript policy (`undecodable-frame`).
         let packet =
             qcy_protocol::packet::decode_packet(bytes).map_err(|_| Denial::MalformedFrame)?;
         for block in &packet.blocks {
             let op = block.cmd;
             if Self::is_destructive(op) {
                 return Err(Denial::DestructiveOpcode(op));
+            }
+            // RequestData (0xFE) is a read-back request, not a state mutation.
+            // It is allowed even for read-only profiles so status/identification
+            // can be read — same rule as the TypeScript policy.
+            if op == REQUEST_DATA_OPCODE {
+                continue;
+            }
+            // Unknown/generic devices are read-only by default: no state-changing
+            // writes past this point.
+            if self.read_only {
+                return Err(Denial::ReadOnlyDevice);
             }
             if self.supported_opcodes.contains(&op) {
                 continue;
@@ -348,6 +364,60 @@ mod tests {
         assert!(matches!(
             p.authorize_direct("0000dead-0000-1000-8000-00805f9b34fb", &[1], false),
             Err(Denial::CharacteristicNotAuthorized(_))
+        ));
+    }
+
+    #[test]
+    fn request_data_is_authorized_even_on_read_only_devices() {
+        // Mirrors the TypeScript policy: RequestData (0xFE) is a read-back
+        // request, not a state mutation. The SPP transport (issue #50) sends
+        // these frames to read battery/version from read-only devices too.
+        let p = WritePolicy::read_only();
+        let frame = encode_command(0xFE, &[0x2F]).unwrap();
+        assert!(p.authorize_frame(&frame, false).is_ok());
+        let ht08 = WritePolicy::ht08();
+        assert!(ht08.authorize_frame(&frame, false).is_ok());
+    }
+
+    #[test]
+    fn request_data_cannot_smuggle_a_state_change_past_read_only() {
+        let p = WritePolicy::read_only();
+        let frame = encode_blocks(&[
+            CommandBlock {
+                cmd: 0xFE,
+                params: vec![0x2F],
+            },
+            CommandBlock {
+                cmd: 0x09,
+                params: vec![0x01],
+            },
+        ])
+        .unwrap();
+        assert!(matches!(
+            p.authorize_frame(&frame, false),
+            Err(Denial::ReadOnlyDevice)
+        ));
+    }
+
+    #[test]
+    fn destructive_opcode_beats_read_only_verdict() {
+        // Destructive is checked before the read-only judgment, mirroring the
+        // TypeScript ordering: the refusal reason must never understate the
+        // danger of a reset/factory-reset frame.
+        let p = WritePolicy::read_only();
+        let frame = encode_command(0x03, &[]).unwrap();
+        assert!(matches!(
+            p.authorize_frame(&frame, false),
+            Err(Denial::DestructiveOpcode(0x03))
+        ));
+    }
+
+    #[test]
+    fn malformed_frame_is_denied_even_on_read_only_devices() {
+        let p = WritePolicy::read_only();
+        assert!(matches!(
+            p.authorize_frame(&[0xFF, 0x40, 0x09], false),
+            Err(Denial::MalformedFrame)
         ));
     }
 }
