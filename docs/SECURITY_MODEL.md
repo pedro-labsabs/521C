@@ -100,15 +100,18 @@ The native transport enforces the same contract in Rust
 and **every** command block is authorized before any byte reaches BlueZ, so a
 supported first block can never smuggle a destructive or unauthorized block past
 the policy; undecodable frames are denied as malformed. The Rust policy is
-aligned with the browser policy with one deliberate fail-safe difference:
-(a) both policies allow `RequestData` (`0xFE`) frames even on read-only
-devices — a read-back request, not a state mutation — and the native policy
-pins additionally that a `0xFE` block can never smuggle a state-changing
-block past the read-only verdict; (b) the native policy has **no**
-pure-disable exception for experimental opcodes — no native flow sends an
-experimental write without a session opt-in, even one that looks like a
-disable. If a future native flow needs that exception, align this document
-and both policy implementations in one change.
+aligned across both languages: (a) both policies allow `RequestData`
+(`0xFE`) frames even on read-only devices — a read-back request, not a
+state mutation — and each pins that a `0xFE` block can never smuggle a
+state-changing block past the read-only verdict; (b) **neither** policy has
+a pure-disable exception for experimental opcodes — no flow sends an
+experimental write without a session opt-in, whatever the payload bytes
+look like (issue #60: a byte-value exception authorized 0x0C outdoor mode
+while denying the true off, because payload meaning is opcode-specific).
+Both opcode sets are pinned to the shared conformance corpus
+(`conformance/protocol_vectors.json`, `writePolicy.ht08`). If a future flow
+needs an exception, align this document, the corpus and both policy
+implementations in one change.
 
 The per-profile opcode/characteristic allowlists live with the device profile
 (`src/lib/qcy/device/catalog.ts`) and must follow the evidence model; issue #6 adds
