@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { transportForTests, useHub } from "./hub-store";
+import { currentNoiseUi, transportForTests, useHub } from "./hub-store";
 import type { SmartProfile } from "./smart-profiles";
+import { Cmd, set } from "./protocol";
 import { MockTransport } from "./transport";
 
 describe("applyProfile structured results (issue #10)", () => {
@@ -75,5 +76,207 @@ describe("coalesced latest-value controls through the store", () => {
     const calls = [30, 45, 60, 75, 90];
     await Promise.all(calls.map((v) => useHub.getState().setSoundBalance(v)));
     expect(useHub.getState().device.soundBalance).toBe(90);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Read-before-write gating for unknown device state (#62)             */
+/* ------------------------------------------------------------------ */
+
+describe("store gating while device state is unknown (#62)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  it("currentNoiseUi is null while the ANC scene is unknown", () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, ancScene: null, noiseMode: -1 } });
+    try {
+      expect(currentNoiseUi(useHub.getState().device)).toBeNull();
+      // A known scene decodes as before.
+      expect(
+        currentNoiseUi({
+          ...d,
+          ancScene: { mode: 0x01, subScene: 0x04, noiseValue: 0x00 },
+        }),
+      ).toBe("wind");
+    } finally {
+      useHub.setState({ device: d });
+    }
+  });
+
+  it("setBinding refuses while the bindings table is unknown", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, bindings: null }, toast: null });
+    try {
+      await useHub.getState().setBinding(0x01, 0x03);
+      const s = useHub.getState();
+      // No write happened: the table is still unknown, not fabricated.
+      expect(s.device.bindings).toBeNull();
+      expect(s.toast?.title).toBe("Write blocked");
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("setBinding merges into the table read from the device when known", async () => {
+    const d = useHub.getState().device;
+    const table = [
+      { keyId: 0x01, funId: 0x02 },
+      { keyId: 0x02, funId: 0x09 },
+    ];
+    useHub.setState({ device: { ...d, bindings: table }, toast: null });
+    try {
+      await useHub.getState().setBinding(0x01, 0x05);
+      const bindings = useHub.getState().device.bindings;
+      expect(bindings).toEqual([
+        { keyId: 0x01, funId: 0x05 },
+        { keyId: 0x02, funId: 0x09 }, // untouched key keeps the read value
+      ]);
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("setWear refuses while wear settings are unknown", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, wear: null }, toast: null });
+    try {
+      await useHub.getState().setWear({ enabled: false });
+      const s = useHub.getState();
+      expect(s.device.wear).toBeNull();
+      expect(s.toast?.title).toBe("Write blocked");
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("chime preflight treats unknown worn state as unknown, never not-worn", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({
+      device: { ...d, wear: null, wornLeft: null, wornRight: null },
+      pendingChime: null,
+    });
+    try {
+      useHub.getState().requestChime("left");
+      const pre = useHub.getState().pendingChime;
+      expect(pre?.status).toBe("confirm-strong");
+      expect(pre?.unknownTargets).toEqual(["left"]);
+    } finally {
+      useHub.setState({ device: d, pendingChime: null });
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Mock transport mirrors the falsified 0x0C hardware behavior (#71)   */
+/* ------------------------------------------------------------------ */
+
+describe("mock transport ignores falsified 0x0C (#71)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  it("applies no state change and emits no ACK for 0x0C writes", async () => {
+    const t = transportForTests() as MockTransport;
+    t.setExperimentalOptIn(true);
+    try {
+      // Settle a known scene-derived noiseMode first.
+      await t.write(set.ancSetting({ mode: 0x01, subScene: 0x03, noiseValue: 0x02 }));
+      const noiseBefore = useHub.getState().device.noiseMode;
+      expect(noiseBefore).toBe(0x01);
+      const rx0cBefore = useHub
+        .getState()
+        .log.filter((e) => e.dir === "rx" && e.cmd === Cmd.NoiseCancelMode).length;
+
+      await t.write(set.noiseMode(0x00)); // live HT08 ignores this
+
+      const rx0cAfter = useHub
+        .getState()
+        .log.filter((e) => e.dir === "rx" && e.cmd === Cmd.NoiseCancelMode).length;
+      expect(rx0cAfter).toBe(rx0cBefore); // no fake ACK
+
+      // A later supported write pushes state; the ignored 0x0C payload must
+      // not have mutated it.
+      await t.write(set.lowLatency("on"));
+      expect(useHub.getState().device.noiseMode).toBe(noiseBefore);
+    } finally {
+      t.setExperimentalOptIn(false);
+    }
+  });
+
+  it("policy still gates 0x0C behind the experimental opt-in", async () => {
+    const t = transportForTests() as MockTransport;
+    t.setExperimentalOptIn(false);
+    await expect(t.write(set.noiseMode(0x01))).rejects.toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* applyProfile surfaces EQ partial failures (#71)                     */
+/* ------------------------------------------------------------------ */
+
+describe("applyProfile EQ partial failure (#71)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  function fixture(id: string, eqId: string): SmartProfile {
+    return {
+      id,
+      name: id,
+      description: "eq failure fixture",
+      builtin: false,
+      noise: "off",
+      ancLevel: 1,
+      transparencyLevel: 1,
+      gameMode: false,
+      eqId,
+      wearDetection: true,
+    };
+  }
+
+  it("reports a failed EQ write and does not mark the profile applied", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-write-fail", "flat"));
+    const activeBefore = useHub.getState().activeProfileId;
+    const t = transportForTests() as MockTransport;
+    t.failOpcode = Cmd.EqParamsV2;
+    try {
+      const result = await useHub.getState().applyProfile("eq-write-fail");
+      expect(result).not.toBeNull();
+      expect(result!.ok).toBe(false);
+      expect(result!.steps.find((s) => s.step === "eq")?.ok).toBe(false);
+      // Failure is surfaced and the profile is NOT marked active.
+      expect(useHub.getState().activeProfileId).toBe(activeBefore);
+      expect(useHub.getState().toast?.title).toBe("Profile partially applied");
+      expect(useHub.getState().toast?.body).toContain("eq");
+    } finally {
+      t.failOpcode = null;
+    }
+  });
+
+  it("reports an unresolvable eqId as a failed step instead of skipping it", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-missing", "no-such-eq"));
+    const activeBefore = useHub.getState().activeProfileId;
+    const result = await useHub.getState().applyProfile("eq-missing");
+    expect(result).not.toBeNull();
+    expect(result!.ok).toBe(false);
+    expect(result!.steps.find((s) => s.step === "eq")?.ok).toBe(false);
+    expect(useHub.getState().activeProfileId).toBe(activeBefore);
+    expect(useHub.getState().toast?.title).toBe("Profile partially applied");
+  });
+
+  it("still marks the profile applied when every step succeeds", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-ok", "flat"));
+    const result = await useHub.getState().applyProfile("eq-ok");
+    expect(result).not.toBeNull();
+    expect(result!.ok).toBe(true);
+    expect(useHub.getState().activeProfileId).toBe("eq-ok");
   });
 });

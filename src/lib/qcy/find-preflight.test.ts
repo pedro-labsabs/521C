@@ -87,7 +87,13 @@ describe("store chime gate (no TX before confirmation)", () => {
     const patch: Partial<DeviceLiveState> = {
       wornLeft,
       wornRight,
-      wear: { ...d.wear, enabled },
+      wear: {
+        musicIndex: 1,
+        ancIndex: 0,
+        toneEnable: true,
+        ...(d.wear ?? {}),
+        enabled,
+      },
     };
     useHub.setState({ device: { ...d, ...patch } });
   }

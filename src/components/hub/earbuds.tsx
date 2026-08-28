@@ -65,8 +65,9 @@ export function EarbudsStage({
   left: BatteryCell;
   right: BatteryCell;
   caseCell: BatteryCell;
-  wornLeft: boolean;
-  wornRight: boolean;
+  /** Null = unknown (real session before a wear observation, issue #62). */
+  wornLeft: boolean | null;
+  wornRight: boolean | null;
   connected: boolean;
   known?: boolean;
 }) {
@@ -86,10 +87,22 @@ export function EarbudsStage({
   );
 }
 
-function Bud({ side, worn, connected }: { side: "L" | "R"; worn: boolean; connected: boolean }) {
+function Bud({
+  side,
+  worn,
+  connected,
+}: {
+  side: "L" | "R";
+  /** Null = unknown: rendered dimmed, same as not-worn, never as worn. */
+  worn: boolean | null;
+  connected: boolean;
+}) {
   const flip = side === "R";
   return (
-    <div className={cn("flex flex-col items-center gap-2", !worn && "opacity-50")}>
+    <div
+      className={cn("flex flex-col items-center gap-2", worn !== true && "opacity-50")}
+      title={worn === null ? "Wear state unknown" : undefined}
+    >
       <svg
         viewBox="0 0 64 120"
         className={cn("h-28 w-14", flip && "-scale-x-100")}

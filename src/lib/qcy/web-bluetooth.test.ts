@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CHAR,
   Cmd,
+  decodePacket,
   encodeBatteryBytes,
   encodeCommand,
+  encodeKeyFunctionDirect,
   set,
 } from "./protocol";
 import {
@@ -77,13 +79,21 @@ function makeFakeDevice(opts: { id?: string; name?: string } = {}): FakeDeviceCt
     right: { level: 56, charging: false },
     case: { level: 77, charging: false },
   });
+  // A device-shaped touch table so the read-before-write path (#62) has
+  // something real to read; tests that want an unreadable table delete the
+  // characteristic before connecting.
+  const keyTable = encodeKeyFunctionDirect([
+    { keyId: 0x01, funId: 0x02 },
+    { keyId: 0x02, funId: 0x02 },
+    { keyId: 0x03, funId: 0x04 },
+  ]);
   const chars = new Map<string, FakeChar>([
     [CHAR.commandWrite, makeChar(CHAR.commandWrite)],
     [CHAR.settingsNotify, makeChar(CHAR.settingsNotify)],
     [CHAR.battery, makeChar(CHAR.battery, battery)],
     [CHAR.version, makeChar(CHAR.version, Uint8Array.from([1, 4, 2]))],
     [CHAR.eqDirect, makeChar(CHAR.eqDirect)],
-    [CHAR.keyFunctionV2, makeChar(CHAR.keyFunctionV2)],
+    [CHAR.keyFunctionV2, makeChar(CHAR.keyFunctionV2, keyTable)],
   ]);
   const service = {
     async getCharacteristic(uuid: string) {
@@ -188,6 +198,40 @@ describe("reducePacketIntoState", () => {
     expect(next.soundBalance).toBe(0x40);
   });
 
+  it("derives noiseMode/adaptive from validated 0x17 scenes (#71)", () => {
+    const state = createRealInitialState();
+    const adaptive = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x01, 0x05, 0x02]) },
+    ]);
+    expect(adaptive.state.ancScene).toEqual({ mode: 0x01, subScene: 0x05, noiseValue: 0x02 });
+    expect(adaptive.state.noiseMode).toBe(0x01);
+    expect(adaptive.state.adaptive).toBe(true);
+
+    const off = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x02, 0x00, 0x00]) },
+    ]);
+    expect(off.state.noiseMode).toBe(0x00);
+    expect(off.state.adaptive).toBe(false);
+
+    const transparent = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x03, 0x02, 0x04]) },
+    ]);
+    expect(transparent.state.noiseMode).toBe(0x03);
+    expect(transparent.state.adaptive).toBe(false);
+  });
+
+  it("never derives ANC state from falsified 0x0C packets (#71)", () => {
+    const known = reducePacketIntoState(createRealInitialState(), [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x01, 0x03, 0x02]) },
+    ]).state;
+    const after0c = reducePacketIntoState(known, [
+      { cmd: Cmd.NoiseCancelMode, params: Uint8Array.from([0x00]) },
+    ]);
+    expect(after0c.changed).toBe(false);
+    expect(after0c.state.noiseMode).toBe(0x01); // scene-derived, untouched
+    expect(after0c.state.ancScene).toEqual(known.ancScene);
+  });
+
   it("ignores unrecognized commands without corrupting state", () => {
     const state = createRealInitialState();
     const { state: next, changed } = reducePacketIntoState(state, [
@@ -195,6 +239,96 @@ describe("reducePacketIntoState", () => {
     ]);
     expect(changed).toBe(false);
     expect(next).toEqual(state);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Real sessions start unknown and read before write (#62)             */
+/* ------------------------------------------------------------------ */
+
+describe("real session unknown state (#62)", () => {
+  it("createRealInitialState marks wear/scene/bindings/worn as unknown", () => {
+    const state = createRealInitialState();
+    expect(state.wornLeft).toBeNull();
+    expect(state.wornRight).toBeNull();
+    expect(state.wear).toBeNull();
+    expect(state.ancScene).toBeNull();
+    expect(state.bindings).toBeNull();
+    expect(state.noiseMode).toBe(-1);
+    expect(state.telemetryKnown).toBe(false);
+  });
+
+  it("mock initial state stays fully populated (unchanged behavior)", async () => {
+    const { createInitialState } = await import("./transport");
+    const state = createInitialState();
+    expect(state.wornLeft).toBe(true);
+    expect(state.wornRight).toBe(true);
+    expect(state.wear).not.toBeNull();
+    expect(state.ancScene).not.toBeNull();
+    expect(state.bindings!.length).toBeGreaterThan(0);
+  });
+
+  it("initialSync reads the touch table and requests wear + ANC scene state", async () => {
+    const { transport, chars } = makeHarness();
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("fake-ht08", events);
+    const last = events.states[events.states.length - 1]!;
+    // Bindings came from the device's characteristic, not from app defaults.
+    expect(last.bindings).toEqual([
+      { keyId: 0x01, funId: 0x02 },
+      { keyId: 0x02, funId: 0x02 },
+      { keyId: 0x03, funId: 0x04 },
+    ]);
+    // Wear (0x2C) and ANC scene (0x17) were requested framed via RequestData.
+    const requested = chars
+      .get(CHAR.commandWrite)!
+      .writes.map((w) => decodePacket(w))
+      .filter((d) => d.ok && d.packet.blocks[0]?.cmd === Cmd.RequestData)
+      .map((d) => (d.ok ? d.packet.blocks[0]!.params[0] : undefined));
+    expect(requested).toContain(Cmd.WearingDetection);
+    expect(requested).toContain(Cmd.AncSetting);
+    // Not answered yet by this fake device: the slices stay unknown.
+    expect(last.wear).toBeNull();
+    expect(last.ancScene).toBeNull();
+  });
+
+  it("missing key characteristic leaves bindings unknown instead of defaulting", async () => {
+    const ctl = makeFakeDevice();
+    ctl.chars.delete(CHAR.keyFunctionV2);
+    const provider = {
+      async requestDevice(_options: unknown) {
+        return ctl.device;
+      },
+    } as unknown as WebBluetoothProvider;
+    const transport = new WebBluetoothTransport(provider);
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("fake-ht08", events);
+    const last = events.states[events.states.length - 1]!;
+    expect(last.bindings).toBeNull();
+    expect(last.wear).toBeNull();
+    expect(last.ancScene).toBeNull();
+  });
+
+  it("device answers to the state requests reduce into known wear/scene", async () => {
+    const { transport, chars } = makeHarness();
+    const events = makeEvents();
+    await transport.scan();
+    await transport.connect("fake-ht08", events);
+    const notify = chars.get(CHAR.settingsNotify)!;
+    notify.emit(encodeCommand(Cmd.WearingDetection, [0x02, 0x03, 0x01, 0x02]));
+    notify.emit(encodeCommand(Cmd.AncSetting, [0x01, 0x04, 0x00]));
+    const last = events.states[events.states.length - 1]!;
+    expect(last.wear).toEqual({
+      enabled: false,
+      musicIndex: 0x03,
+      ancIndex: 0x01,
+      toneEnable: false,
+    });
+    expect(last.ancScene).toEqual({ mode: 0x01, subScene: 0x04, noiseValue: 0x00 });
+    expect(last.noiseMode).toBe(0x01);
+    expect(last.adaptive).toBe(false);
   });
 });
 
@@ -244,8 +378,12 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     await transport.connect("fake-ht08", events);
     await transport.write(set.lowLatency("on"));
     const cmdChar = chars.get(CHAR.commandWrite)!;
-    expect(cmdChar.writes.length).toBe(1);
-    expect(cmdChar.writes[0]![2]).toBe(Cmd.LowLatency);
+    // initialSync already requested wear (0x2C) and ANC scene (0x17) state
+    // via framed RequestData (#62); the caller's frame is the next write.
+    const syncFrames = cmdChar.writes.filter((w) => w[2] === Cmd.RequestData);
+    expect(syncFrames.length).toBe(2);
+    const last = cmdChar.writes[cmdChar.writes.length - 1]!;
+    expect(last[2]).toBe(Cmd.LowLatency);
   });
 
   it("writeDirect targets the requested allowlisted characteristic", async () => {
@@ -253,10 +391,12 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     const events = makeEvents();
     await transport.scan();
     await transport.connect("fake-ht08", events);
+    const framedBefore = chars.get(CHAR.commandWrite)!.writes.length;
     const payload = Uint8Array.from([1, 2, 3, 4]);
     await transport.writeDirect(CHAR.keyFunctionV2, payload);
     expect(chars.get(CHAR.keyFunctionV2)!.writes.length).toBe(1);
-    expect(chars.get(CHAR.commandWrite)!.writes.length).toBe(0);
+    // Only the initialSync RequestData frames may sit on the command char.
+    expect(chars.get(CHAR.commandWrite)!.writes.length).toBe(framedBefore);
   });
 
   it("failed reconnect invalidates the previous session", async () => {
@@ -269,7 +409,8 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     // Stale handles must not be usable after the failed reconnect.
     await expect(transport.write(set.lowLatency("on"))).rejects.toThrow("Not connected");
     await expect(transport.read(CHAR.battery)).rejects.toThrow("Not connected");
-    expect(ctl.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+    // No write beyond the first session's initialSync requests may arrive.
+    expect(ctl.chars.get(CHAR.commandWrite)!.writes.length).toBeLessThanOrEqual(2);
   });
 
   it("missing vendor service leaves no session behind", async () => {
@@ -287,6 +428,7 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     const events = makeEvents();
     await transport.scan();
     await transport.connect("fake-ht08", events);
+    const framedAtDisconnect = ctl.chars.get(CHAR.commandWrite)!.writes.length;
     ctl.fire("gattserverdisconnected");
     const last = events.states[events.states.length - 1]!;
     expect(last.connected).toBe(false);
@@ -296,7 +438,7 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     await expect(
       transport.writeDirect(CHAR.keyFunctionV2, Uint8Array.from([1, 2, 3, 4])),
     ).rejects.toThrow("Not connected");
-    expect(ctl.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
+    expect(ctl.chars.get(CHAR.commandWrite)!.writes.length).toBe(framedAtDisconnect);
     expect(ctl.chars.get(CHAR.keyFunctionV2)!.writes).toHaveLength(0);
   });
 
@@ -316,10 +458,14 @@ describe("WebBluetoothTransport (fake GATT)", () => {
     current = ctlB;
     await transport.scan();
     await transport.connect("dev-b", events);
+    // A's session ended when B connected: record what A legitimately saw
+    // (its own initialSync requests) and ensure nothing more arrives.
+    const aWrites = ctlA.chars.get(CHAR.commandWrite)!.writes.length;
     await transport.write(set.lowLatency("on"));
     // After A -> B replacement, only B's characteristic may receive bytes.
-    expect(ctlA.chars.get(CHAR.commandWrite)!.writes).toHaveLength(0);
-    expect(ctlB.chars.get(CHAR.commandWrite)!.writes).toHaveLength(1);
+    expect(ctlA.chars.get(CHAR.commandWrite)!.writes.length).toBe(aWrites);
+    const bWrites = ctlB.chars.get(CHAR.commandWrite)!.writes;
+    expect(bWrites[bWrites.length - 1]![2]).toBe(Cmd.LowLatency);
   });
 
   it("disconnect is idempotent and clears cached characteristics", async () => {
