@@ -1,9 +1,16 @@
 //! Central write-authorization policy (Rust mirror of issue #1).
 //!
 //! The sets below are derived from the canonical evidence ledger
-//! (`src/lib/qcy/protocol/evidence.ts` in the web tree). An opcode is writable only if
-//! the ledger records it as `write-supported`; `write-experimental` opcodes additionally
-//! require a session opt-in. Destructive opcodes are never authorized for automation.
+//! (`src/lib/qcy/protocol/evidence.ts` in the web tree) and are pinned against
+//! the shared conformance corpus (`conformance/protocol_vectors.json`,
+//! section `writePolicy.ht08`) by `tests/conformance_write_policy.rs` and the
+//! TS suite — the #53 demotion of 0x0C drifted here unnoticed once (audit #59);
+//! the corpus pin makes any future drift fail CI on both sides.
+//!
+//! An opcode is writable only if the ledger records it as `write-supported`;
+//! `write-experimental` opcodes additionally require a session opt-in (the
+//! native policy has no pure-disable exception — see docs/SECURITY_MODEL.md).
+//! Destructive opcodes are never authorized for automation.
 
 use std::collections::HashSet;
 
@@ -22,7 +29,6 @@ const SUPPORTED_OPCODES: &[u8] = &[
     0x05, // LightFlash
     0x06, // InEarDetection
     0x09, // LowLatency
-    0x0C, // NoiseCancelMode
     0x10, // SleepMode
     0x16, // SoundBalance
     0x17, // AncSetting
@@ -33,6 +39,8 @@ const SUPPORTED_OPCODES: &[u8] = &[
 
 /// Opcodes the ledger records as `write-experimental` (need a session opt-in).
 const EXPERIMENTAL_OPCODES: &[u8] = &[
+    0x0C, // NoiseCancelMode — falsified on live HT08 (#52/#53): writes ignored,
+          // no ACK; ANC state uses the validated 0x17 scene table instead.
     0x23, // Ldac
     0x2D, // SpatialAudio
     0x32, // EnvAdaptation

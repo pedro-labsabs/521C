@@ -872,9 +872,26 @@ mod tests {
     fn attestation_lifts_read_only_and_the_frame_reaches_the_wire() {
         let (mut t, pipe) = connected();
         t.attest_model_known();
-        let frame = encode_command(0x0C, &[0x01]).unwrap();
+        let frame = encode_command(0x09, &[0x01]).unwrap();
         t.write(&frame).unwrap();
         assert_eq!(pipe.tx.lock().unwrap().as_slice(), &[frame]);
+    }
+
+    #[test]
+    fn falsified_0x0c_needs_opt_in_over_spp_like_everywhere_else() {
+        // Audit #59: 0x0C NoiseCancelMode was demoted to write-experimental
+        // (#53) after live HT08 validation showed the device ignores it. The
+        // SPP path must enforce the same opt-in as GATT.
+        let (mut t, pipe) = connected();
+        t.attest_model_known();
+        let frame = encode_command(0x0C, &[0x01]).unwrap();
+        assert!(matches!(
+            t.write(&frame),
+            Err(TransportError::Denied(
+                crate::policy::Denial::ExperimentalWithoutOptIn(0x0C)
+            ))
+        ));
+        assert!(pipe.tx.lock().unwrap().is_empty());
     }
 
     #[test]
