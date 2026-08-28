@@ -8,6 +8,17 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Added
 
+- Deep-audit hardening cycle (#59–#71): both write policies now pin their
+  opcode sets to the shared conformance corpus (`writePolicy.ht08`), the
+  BlueZ transport closes the same-name-fallback wrong-device write path
+  (`Transport::session_address` + attestation correlation), corrects the
+  SCO/HFP UUID set and discovery lifecycle, and resolves duplicate GATT
+  UUIDs deterministically; the resident-session supervisor became
+  time-driven and interruptible (Disconnect honored mid re-bootstrap);
+  game-mode cooldown-suppressed transitions are retried instead of lost;
+  MPRIS player selection is deterministic; the desktop reports its real
+  transport backend, rolls back failed toggles, and keeps a reconnecting
+  status line during recovery.
 - Live HT08 transport resolution (#50/#52): the control path is BLE GATT on
   the earbuds' separate LE identity (`0000a001` vendor service), validated
   on real hardware — battery/firmware reads, ANC writes with firmware ACKs,
@@ -47,6 +58,16 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Changed
 
+- Write authorization tightened (#60): the browser policy's pure-disable
+  carve-out is gone — every experimental-opcode write requires the session
+  opt-in in both languages (the carve-out authorized 0x0C outdoor mode
+  while denying the true off, because payload meaning is opcode-specific).
+- Web Bluetooth real sessions start honest (#62): worn/wear/ANC/key state
+  is unknown until read from the device; writes that need unknown state
+  refuse with a clear message instead of guessing. Mock behavior unchanged.
+- `521cctl anc` emits the validated 0x17 scene table instead of the
+  falsified 0x0C opcode (#59); CLI argument handling is loud and explicit
+  (unknown/misplaced flags and bare write commands are errors) (#70).
 - ANC control model replaced (#53/#55/#56): live HT08 validation falsified
   `0x0C NoiseCancelMode` (writes ignored, no ACK) — demoted to
   experimental/opt-in in the evidence ledger. All ANC UI flows (web surface
@@ -71,6 +92,18 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Fixed
 
+- Config persistence: a profile using noise mode "wind" no longer makes
+  loadPersistedConfig reject the entire persisted config (#63); string
+  limits measured in UTF-8 bytes on both sides (#71); storage save
+  failures are surfaced instead of swallowed (#71).
+- SPP backend: live `is_connected` state (supervisor loop hazard),
+  FrameReader resync after a stray 0xFF, notifications gated on
+  subscription (#68).
+- Game mode no longer stays stuck on when the game exits inside the
+  cooldown window; desktop game-mode clock is monotonic (#65).
+- Evidence ledger hygiene: 0x28 AncResult capture recorded, stale
+  capability cross-references fixed, corpus firmware/SPP notes corrected
+  (#69).
 - Desktop noise buttons had no effect on real hardware: the native core
   still encoded the falsified 0x0C opcode; it now emits the validated 0x17
   scenes, and the Off button is no longer permanently disabled by stale UI
