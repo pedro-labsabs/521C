@@ -987,7 +987,10 @@ pub fn parse_any_stored_config(raw: &serde_json::Value) -> ParseResult<Persisted
 /// Minimal storage boundary (filesystem in production, in-memory in tests).
 pub trait ConfigStorage {
     fn read(&self) -> Option<String>;
-    fn write(&mut self, value: &str);
+    /// Persist the serialized config. Failures are surfaced to the caller
+    /// (#71): a failed save must never be silent, because config and model
+    /// attestations would otherwise no-op with no user feedback.
+    fn write(&mut self, value: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1037,9 +1040,13 @@ pub fn load_persisted_config(storage: &mut dyn ConfigStorage) -> LoadResult {
 }
 
 /// Persist the full local config (portable + local-only fields) with the schema
-/// version.
-pub fn save_persisted_config(storage: &mut dyn ConfigStorage, config: &PersistedConfig) {
-    storage.write(&serde_json::to_string_pretty(config).expect("PersistedConfig serializes"));
+/// version. Returns the storage error so the caller can show it (#71) — a
+/// failed save is never swallowed here.
+pub fn save_persisted_config(
+    storage: &mut dyn ConfigStorage,
+    config: &PersistedConfig,
+) -> Result<(), String> {
+    storage.write(&serde_json::to_string_pretty(config).expect("PersistedConfig serializes"))
 }
 
 /// Build the export/backup payload: portable fields only. Local-only fields and
@@ -1125,24 +1132,29 @@ impl ConfigStorage for XdgStorage {
     fn read(&self) -> Option<String> {
         std::fs::read_to_string(&self.path).ok()
     }
-    fn write(&mut self, value: &str) {
+    fn write(&mut self, value: &str) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return;
-            }
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("cannot create config dir {}: {e}", parent.display())
+            })?;
         }
         // Atomic replace: write a temp file in the same directory, then
         // rename over the target. A crash mid-write can therefore never
         // truncate the existing config; the old file stays intact until
-        // the new one is fully on disk.
-        let tmp = self.path.with_extension("json.tmp");
-        if std::fs::write(&tmp, value).is_err() {
+        // the new one is fully on disk. The tmp name is pid-qualified so
+        // concurrent instances cannot collide on the same temp file (#71).
+        let tmp = self
+            .path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, value) {
             let _ = std::fs::remove_file(&tmp);
-            return;
+            return Err(format!("cannot write {}: {e}", tmp.display()));
         }
-        if std::fs::rename(&tmp, &self.path).is_err() {
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot replace {}: {e}", self.path.display()));
         }
+        Ok(())
     }
 }
 
@@ -1156,8 +1168,20 @@ mod tests {
         fn read(&self) -> Option<String> {
             self.0.clone()
         }
-        fn write(&mut self, value: &str) {
+        fn write(&mut self, value: &str) -> Result<(), String> {
             self.0 = Some(value.to_string());
+            Ok(())
+        }
+    }
+
+    /// Storage whose writes always fail (#71 error path).
+    struct FailingStorage;
+    impl ConfigStorage for FailingStorage {
+        fn read(&self) -> Option<String> {
+            None
+        }
+        fn write(&mut self, _value: &str) -> Result<(), String> {
+            Err("simulated disk failure".into())
         }
     }
 
@@ -1172,7 +1196,7 @@ mod tests {
             host: "mint".into(),
             rssi: -52.0,
         });
-        save_persisted_config(&mut storage, &config);
+        save_persisted_config(&mut storage, &config).expect("save succeeds");
         let loaded = load_persisted_config(&mut storage);
         assert!(!loaded.used_defaults);
         assert_eq!(loaded.config, config);
@@ -1247,20 +1271,53 @@ mod tests {
         let mut storage = XdgStorage::new(path.clone());
 
         // First write creates the file with the exact content.
-        storage.write(r#"{"schema":1}"#);
+        storage.write(r#"{"schema":1}"#).expect("first write");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"schema":1}"#);
 
         // Overwrite replaces atomically; no stray temp file remains.
-        storage.write(r#"{"schema":1,"theme":"dark"}"#);
+        storage
+            .write(r#"{"schema":1,"theme":"dark"}"#)
+            .expect("second write");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             r#"{"schema":1,"theme":"dark"}"#
         );
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         assert!(
-            !dir.join("config.json.tmp").exists(),
+            !tmp.exists(),
             "temp file must not outlive a successful write"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_failure_is_surfaced_to_the_caller() {
+        // #71: a failed save must never be silent.
+        let mut storage = FailingStorage;
+        let config = default_persisted();
+        let err = save_persisted_config(&mut storage, &config).expect_err("save must fail");
+        assert!(err.contains("simulated disk failure"));
+    }
+
+    #[test]
+    fn xdg_storage_write_error_is_surfaced_not_swallowed() {
+        // Point the config at a directory that cannot be created: a regular
+        // file blocks create_dir_all.
+        let dir = std::env::temp_dir().join(format!(
+            "521c-cfg-fail-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let mut storage = XdgStorage::new(blocker.join("521c").join("config.json"));
+        let err = storage.write("{}").expect_err("write must fail");
+        assert!(
+            err.contains("cannot create config dir"),
+            "unexpected error: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
