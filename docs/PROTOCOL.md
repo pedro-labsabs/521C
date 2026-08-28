@@ -115,7 +115,7 @@ Live HT08 findings (issues #50/#52, 2026-08-27):
 | 0x05 | LightFlash | Find-earbuds LED |
 | 0x06 | InEarDetection | 0x01 on, 0x02 off |
 | 0x09 | LowLatency | Game mode |
-| 0x0C | NoiseCancelMode | 0 off, 1 ANC, 2 outdoor, 3 transparency |
+| 0x0C | NoiseCancelMode | FALSIFIED on live HT08 (ignored, no ACK); experimental/opt-in only — ANC state uses 0x17 |
 | 0x10 | SleepMode | |
 | 0x16 | SoundBalance | 0–100, 50 center |
 | 0x17 | AncSetting | mode, subScene, noiseValue |
@@ -125,7 +125,7 @@ Live HT08 findings (issues #50/#52, 2026-08-27):
 | 0x2D | SpatialAudio | experimental |
 | 0x2F | Battery | |
 | 0x30 | Version | |
-| 0x32 | EnvAdaptation | experimental Adaptive ANC mapping |
+| 0x32 | EnvAdaptation | experimental; unvalidated on HT08 — adaptive uses 0x17 (1,5,2) |
 | 0x3D | TonePlay | locator chime |
 | 0xFE | RequestData | read-back any cmd |
 

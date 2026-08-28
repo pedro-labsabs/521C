@@ -26,11 +26,11 @@ earbud write) · **P** protocol known, app pending · **R** needs protocol resea
 | Charging flags | RO | bit7 |
 | Firmware read | RO | 0x30 |
 | RSSI proximity | RO | Host BLE, not GPS |
-| ANC off / on | S | 0x0C |
-| Adaptive ANC | E | Hardware yes; mapped via 0x32 |
-| Indoor / commute / noisy | S | 0x17 scenes |
-| Wind reduction | R | Official app only so far |
-| Transparency + levels | S | 0x0C / 0x17 0x0A |
+| ANC off / on | S | 0x17 scenes (2,0,0) / (1,1,2) — live-validated; 0x0C falsified (#52) |
+| Adaptive ANC | S | 0x17 (1,5,2), ACK (1,5,0) + voice prompt; 0x32 EnvAdaptation unvalidated on this model |
+| Indoor / commute / noisy | S | 0x17 scenes (1,1,2) / (1,2,2) / (1,3,2) — live-validated |
+| Wind reduction | S | 0x17 (1,4,2), ACK (1,4,0) — live-validated |
+| Transparency | S | 0x17 (3,2,4), ACK (3,2,0) — live-validated; adjustable levels not validated (read-only) |
 | Vocal enhance | R | Mentioned in reviews; no named opcode yet |
 | Game mode | S | 0x09 |
 | Auto game mode | Host | qcy-host: MPRIS player-presence signal + debounce + keyword allowlist, no polling; tracks all active candidates as a set (one player leaving never clears another). Wired by the desktop app (#8); no BLE traffic while idle |
@@ -49,14 +49,19 @@ earbud write) · **P** protocol known, app pending · **R** needs protocol resea
 | Codec status | Host | Read passively from BlueZ MediaTransport1 (codec/sample rate/profile); unknown when unavailable — never invented |
 | Firmware OTA | F | Not yet safely supported; no flash path sent |
 
-Linux control transport (issue #50): BlueZ does not expose the QCY vendor
-GATT service for these dual-mode earbuds, so the native path is SPP/RFCOMM
-(`00001101`) carrying the same `0xFF` framing — implemented in
-`native/crates/qcy-transport/src/rfcomm.rs` behind the same `Transport`
-contract and write policy (`521cctl --spp`). HT08 on-wire confirmation
-(SDP channel, first read, first allowlisted write) is pending; until it
-lands, the readiness above is exercised over the mock and GATT backends.
-The Web Bluetooth path keeps using GATT where the vendor service is exposed.
+Linux control transport (issue #50, resolved by #52): the HT08 control path
+is BLE GATT. BlueZ resolves the vendor service `0000a001` on the earbuds'
+**separate LE control identity** (paired alongside the BR/EDR audio
+identity); scanning only the audio MAC is what originally hid it. Live HT08
+validation: battery/firmware reads, the full 0x17 ANC scene table with
+firmware ACKs, and a resident LE session coexisting with BR/EDR audio. An
+active HFP/SCO (hands-free) session blocks LE connection initiation
+host-side (`le-connection-abort-by-local`); the native transport preflights
+it and the app holds the session with a resident supervisor (#54/#57/#58).
+SPP/RFCOMM (`native/crates/qcy-transport/src/rfcomm.rs`, `521cctl --spp`)
+remains as a generic backend for models whose evidence points there, but it
+is **not** the HT08 path: HT08 SPP channel 1 ("COM5") only byte-ACKs frames
+and executes nothing. The Web Bluetooth path uses the same GATT surface.
 
 Future models plug in as additional `QcyDeviceProfile` entries. Do not scatter
 `if model == "HT08"` through the UI. Host-side features (System EQ, Auto game mode, Codec status) are implemented in the
