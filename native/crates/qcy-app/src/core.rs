@@ -49,6 +49,10 @@ pub struct DeviceSnapshot {
     pub connected: bool,
     pub name: String,
     pub address: String,
+    /// The identity actually holding the live session, when the transport
+    /// knows it and it differs from the requested address (dual-mode LE
+    /// fallback, #67). Attestations correlate with this identity.
+    pub session_address: Option<String>,
     /// False when the model is not proven from advertisement/name evidence; such
     /// devices stay read-only.
     pub model_known: bool,
@@ -490,10 +494,19 @@ impl AppCore {
                         snapshot.rssi = dev.rssi;
                         snapshot.model_known = dev.model_known;
                     }
+                    // The identity holding the session may differ from the
+                    // requested address after a dual-mode LE fallback (#67).
+                    // Attestation must correlate with the SESSION identity when
+                    // the transport knows it, never with the requested address
+                    // alone.
+                    let session_address =
+                        transport.session_address().map(|a| normalize_address(&a));
+                    let attest_address = session_address
+                        .clone()
+                        .unwrap_or_else(|| normalize_address(&address));
+                    snapshot.session_address = session_address;
                     // A previously confirmed model starts writable.
-                    if !snapshot.model_known
-                        && known_devices.contains(&normalize_address(&address))
-                    {
+                    if !snapshot.model_known && known_devices.contains(&attest_address) {
                         transport.attest_model_known();
                         snapshot.model_known = true;
                     }
@@ -588,10 +601,21 @@ impl AppCore {
                             }
                             state.transport.attest_model_known();
                             state.snapshot.model_known = true;
-                            if !state.known_devices.contains(&normalized) {
-                                state.known_devices.push(normalized.clone());
+                            // Persist the identity that actually holds the
+                            // session (#67): the next connect must auto-attest
+                            // the session identity, not the requested address
+                            // that may have fallen back.
+                            let persist_address = state
+                                .snapshot
+                                .session_address
+                                .clone()
+                                .unwrap_or(normalized);
+                            if !state.known_devices.contains(&persist_address) {
+                                state.known_devices.push(persist_address.clone());
                             }
-                            emit(AppEvent::ModelConfirmed { address: normalized });
+                            emit(AppEvent::ModelConfirmed {
+                                address: persist_address,
+                            });
                             emit(AppEvent::StateChanged(state.snapshot.clone()));
                         }
                         AppCommand::Disconnect => {

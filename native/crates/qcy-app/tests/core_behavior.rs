@@ -47,6 +47,9 @@ struct TestTransport {
     shared: Arc<Mutex<Shared>>,
     /// Devices reported as already connected at host level (`connected_devices`).
     connected_list: Vec<DiscoveredDevice>,
+    /// Identity holding the live session when it differs from the requested
+    /// address (dual-mode LE fallback, #67). `None` = transport does not know.
+    session_addr: Option<String>,
 }
 
 impl TestTransport {
@@ -60,6 +63,7 @@ impl TestTransport {
                 connected_model_known: false,
                 shared: Arc::clone(&shared),
                 connected_list: Vec::new(),
+                session_addr: None,
             },
             shared,
         )
@@ -111,6 +115,10 @@ impl Transport for TestTransport {
 
     fn is_connected(&mut self) -> Result<bool, TransportError> {
         Ok(self.connected && self.shared.lock().expect("shared mutex").link_up)
+    }
+
+    fn session_address(&mut self) -> Option<String> {
+        self.connected.then(|| self.session_addr.clone()).flatten()
     }
 
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
@@ -909,5 +917,100 @@ fn supervisor_ticks_run_under_continuous_command_traffic() {
 
     stop.store(true, Ordering::SeqCst);
     let _ = flooder.join();
+    handle.shutdown();
+}
+
+/* #67: attestation correlates with the session identity, not the request */
+
+const SESSION_ADDR: &str = "11:22:33:44:55:66";
+
+fn start_with_session_addr(
+    session_addr: Option<&str>,
+    known_devices: Vec<String>,
+) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
+    let (mut transport, shared) = TestTransport::new(false);
+    transport.session_addr = session_addr.map(|a| a.to_string());
+    (
+        AppCore::start(Box::new(transport), HostServices::default(), known_devices),
+        shared,
+    )
+}
+
+fn scan_connect_snapshot(handle: &qcy_app::core::AppHandle) -> qcy_app::core::DeviceSnapshot {
+    handle.send(AppCommand::Scan).unwrap();
+    recv_until(handle, |e| matches!(e, AppEvent::Discovered(_)));
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    let event = recv_until(
+        handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    snapshot
+}
+
+#[test]
+fn known_requested_address_does_not_attest_a_different_session_identity() {
+    // The requested address was confirmed before, but the live session is
+    // held by a fallback identity: the connection must stay read-only.
+    let (handle, shared) = start_with_session_addr(Some(SESSION_ADDR), vec![ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address.as_deref(), Some(SESSION_ADDR));
+    assert!(
+        !snapshot.model_known,
+        "attestation must not transfer from the requested address to an unknown session identity"
+    );
+    // Writes are denied read-only.
+    handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Denied(_)));
+    assert!(shared.lock().expect("shared mutex").writes.is_empty());
+    handle.shutdown();
+}
+
+#[test]
+fn known_session_address_attests_the_fallback_identity() {
+    // The session identity itself was confirmed: the connection starts writable.
+    let (handle, _shared) =
+        start_with_session_addr(Some(SESSION_ADDR), vec![SESSION_ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address.as_deref(), Some(SESSION_ADDR));
+    assert!(
+        snapshot.model_known,
+        "a confirmed session identity must start writable"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn without_session_address_knowledge_the_requested_address_still_correlates() {
+    // Transport does not know the session identity (default None): the
+    // pre-#67 requested-address correlation stays intact.
+    let (handle, _shared) = start_with_session_addr(None, vec![ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address, None);
+    assert!(snapshot.model_known);
+    handle.shutdown();
+}
+
+#[test]
+fn confirm_model_persists_the_session_address() {
+    // Confirming the model while the session is held by a fallback identity
+    // must persist THAT identity, so the next connect auto-attests it.
+    let (handle, _shared) = start_with_session_addr(Some(SESSION_ADDR), Vec::new());
+    scan_connect_snapshot(&handle);
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: ADDR.into(),
+        })
+        .unwrap();
+    let event = recv_until(&handle, |e| matches!(e, AppEvent::ModelConfirmed { .. }));
+    assert_eq!(
+        event,
+        AppEvent::ModelConfirmed {
+            address: SESSION_ADDR.into()
+        },
+        "the persisted attestation must target the session identity"
+    );
     handle.shutdown();
 }
