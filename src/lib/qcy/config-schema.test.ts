@@ -317,6 +317,35 @@ describe("config schema boundaries", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("measures string limits in UTF-8 bytes, matching the Rust side (#71)", () => {
+    // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes. 40 of them fit the 80-byte
+    // profile-name limit exactly; 41 exceed it in bytes while still only 41
+    // code units — the case the old UTF-16 measurement let through.
+    const atLimit = "é".repeat(LIMITS.maxNameLen / 2);
+    const overLimit = "é".repeat(LIMITS.maxNameLen / 2 + 1);
+    expect(atLimit.length).toBeLessThan(LIMITS.maxNameLen); // would pass the old check
+    const ok = parseExternalConfig(
+      validExternal({ customProfiles: [validProfile({ name: atLimit })] }),
+    );
+    expect(ok.ok).toBe(true);
+    const bad = parseExternalConfig(
+      validExternal({ customProfiles: [validProfile({ name: overLimit })] }),
+    );
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.errors[0]?.message).toContain("bytes (UTF-8)");
+    }
+    // ASCII behaves exactly as before: one byte per character.
+    const asciiOver = parseExternalConfig(
+      validExternal({ autoGameKeyword: "x".repeat(LIMITS.maxKeywordLen + 1) }),
+    );
+    expect(asciiOver.ok).toBe(false);
+    const asciiAt = parseExternalConfig(
+      validExternal({ autoGameKeyword: "x".repeat(LIMITS.maxKeywordLen) }),
+    );
+    expect(asciiAt.ok).toBe(true);
+  });
+
   it("enforces sleep timer bounds on persisted config", () => {
     expect(parsePersistedConfig(validPersisted({ sleepTimerMin: LIMITS.sleepTimerMax + 1 })).ok).toBe(false);
     expect(parsePersistedConfig(validPersisted({ sleepTimerMin: LIMITS.sleepTimerMin - 1 })).ok).toBe(false);

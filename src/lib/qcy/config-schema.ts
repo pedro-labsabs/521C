@@ -73,6 +73,10 @@ export type PersistedConfig = ExternalConfig & {
 /* Limits                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Length limits are UTF-8 BYTES (not UTF-16 code units), matching the Rust
+ * validator so both sides of the shared config contract agree (issue #71).
+ */
 export const LIMITS = {
   maxCustomEq: 64,
   maxCustomProfiles: 64,
@@ -147,6 +151,18 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const utf8Encoder = new TextEncoder();
+
+/**
+ * UTF-8 byte length of a string. String limits in this schema are measured in
+ * UTF-8 bytes so the TypeScript and Rust validators agree on the same shared
+ * config contract (issue #71): a UTF-16 code-unit count rejects different
+ * non-ASCII inputs near the limit than the Rust side's byte count.
+ */
+function utf8Length(v: string): number {
+  return utf8Encoder.encode(v).length;
+}
+
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
@@ -170,8 +186,8 @@ class Validator {
       if (v !== undefined) this.fail(path, "expected a string");
       return undefined;
     }
-    if (v.length > maxLen) {
-      this.fail(path, `longer than ${maxLen} characters`);
+    if (utf8Length(v) > maxLen) {
+      this.fail(path, `longer than ${maxLen} bytes (UTF-8)`);
       return undefined;
     }
     return v;
@@ -416,8 +432,8 @@ function validateKnownDevices(v: Validator, raw: unknown): string[] | undefined 
       ok = false;
       return;
     }
-    if (trimmed.length > LIMITS.maxAddressLen) {
-      v.fail(`knownDevices[${i}]`, `longer than ${LIMITS.maxAddressLen} characters`);
+    if (utf8Length(trimmed) > LIMITS.maxAddressLen) {
+      v.fail(`knownDevices[${i}]`, `longer than ${LIMITS.maxAddressLen} bytes (UTF-8)`);
       ok = false;
       return;
     }
