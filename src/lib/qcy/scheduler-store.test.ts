@@ -170,3 +170,48 @@ describe("store gating while device state is unknown (#62)", () => {
   });
 });
 
+/* ------------------------------------------------------------------ */
+/* Mock transport mirrors the falsified 0x0C hardware behavior (#71)   */
+/* ------------------------------------------------------------------ */
+
+describe("mock transport ignores falsified 0x0C (#71)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  it("applies no state change and emits no ACK for 0x0C writes", async () => {
+    const t = transportForTests() as MockTransport;
+    t.setExperimentalOptIn(true);
+    try {
+      // Settle a known scene-derived noiseMode first.
+      await t.write(set.ancSetting({ mode: 0x01, subScene: 0x03, noiseValue: 0x02 }));
+      const noiseBefore = useHub.getState().device.noiseMode;
+      expect(noiseBefore).toBe(0x01);
+      const rx0cBefore = useHub
+        .getState()
+        .log.filter((e) => e.dir === "rx" && e.cmd === Cmd.NoiseCancelMode).length;
+
+      await t.write(set.noiseMode(0x00)); // live HT08 ignores this
+
+      const rx0cAfter = useHub
+        .getState()
+        .log.filter((e) => e.dir === "rx" && e.cmd === Cmd.NoiseCancelMode).length;
+      expect(rx0cAfter).toBe(rx0cBefore); // no fake ACK
+
+      // A later supported write pushes state; the ignored 0x0C payload must
+      // not have mutated it.
+      await t.write(set.lowLatency("on"));
+      expect(useHub.getState().device.noiseMode).toBe(noiseBefore);
+    } finally {
+      t.setExperimentalOptIn(false);
+    }
+  });
+
+  it("policy still gates 0x0C behind the experimental opt-in", async () => {
+    const t = transportForTests() as MockTransport;
+    t.setExperimentalOptIn(false);
+    await expect(t.write(set.noiseMode(0x01))).rejects.toThrow();
+  });
+});

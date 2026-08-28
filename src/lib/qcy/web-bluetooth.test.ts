@@ -198,6 +198,40 @@ describe("reducePacketIntoState", () => {
     expect(next.soundBalance).toBe(0x40);
   });
 
+  it("derives noiseMode/adaptive from validated 0x17 scenes (#71)", () => {
+    const state = createRealInitialState();
+    const adaptive = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x01, 0x05, 0x02]) },
+    ]);
+    expect(adaptive.state.ancScene).toEqual({ mode: 0x01, subScene: 0x05, noiseValue: 0x02 });
+    expect(adaptive.state.noiseMode).toBe(0x01);
+    expect(adaptive.state.adaptive).toBe(true);
+
+    const off = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x02, 0x00, 0x00]) },
+    ]);
+    expect(off.state.noiseMode).toBe(0x00);
+    expect(off.state.adaptive).toBe(false);
+
+    const transparent = reducePacketIntoState(state, [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x03, 0x02, 0x04]) },
+    ]);
+    expect(transparent.state.noiseMode).toBe(0x03);
+    expect(transparent.state.adaptive).toBe(false);
+  });
+
+  it("never derives ANC state from falsified 0x0C packets (#71)", () => {
+    const known = reducePacketIntoState(createRealInitialState(), [
+      { cmd: Cmd.AncSetting, params: Uint8Array.from([0x01, 0x03, 0x02]) },
+    ]).state;
+    const after0c = reducePacketIntoState(known, [
+      { cmd: Cmd.NoiseCancelMode, params: Uint8Array.from([0x00]) },
+    ]);
+    expect(after0c.changed).toBe(false);
+    expect(after0c.state.noiseMode).toBe(0x01); // scene-derived, untouched
+    expect(after0c.state.ancScene).toEqual(known.ancScene);
+  });
+
   it("ignores unrecognized commands without corrupting state", () => {
     const state = createRealInitialState();
     const { state: next, changed } = reducePacketIntoState(state, [
@@ -293,6 +327,8 @@ describe("real session unknown state (#62)", () => {
       toneEnable: false,
     });
     expect(last.ancScene).toEqual({ mode: 0x01, subScene: 0x04, noiseValue: 0x00 });
+    expect(last.noiseMode).toBe(0x01);
+    expect(last.adaptive).toBe(false);
   });
 });
 

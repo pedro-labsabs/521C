@@ -457,12 +457,13 @@ export class MockTransport implements QcyTransport {
         this.emitRx(respond(Cmd.Version, [a, b, c, a, b, c]));
         return;
       }
-      case Cmd.NoiseCancelMode: {
-        if (p.length) this.state = { ...this.state, noiseMode: p[0]!, adaptive: false };
-        this.emitRx(respond(Cmd.NoiseCancelMode, [this.state.noiseMode]));
-        this.push();
+      case Cmd.NoiseCancelMode:
+        // 0x0C is falsified on the live HT08 unit (2026-08-27): the device
+        // ignores these writes — no ACK, no state change. The mock mirrors
+        // the evidenced hardware instead of simulating a fake success (#71).
+        // Policy gating is unaffected: 0x0C stays experimental and only
+        // reaches this point behind the session opt-in.
         return;
-      }
       case Cmd.AncSetting: {
         if (p.length >= 3) {
           this.state = {
@@ -723,18 +724,24 @@ export function reducePacketIntoState(
       case Cmd.AncSetting: {
         const ancScene = parseAncScene(p);
         if (ancScene) {
-          next = { ...next, ancScene };
+          // The ANC scene state is derived ONLY from the validated 0x17
+          // (mode, subScene) table. noiseMode/adaptive follow the scene (as
+          // currentNoiseUi does) so touch-sensor scene changes cannot leave
+          // them stale (#71).
+          next = {
+            ...next,
+            ancScene,
+            noiseMode: ancScene.mode === 0x02 ? 0x00 : ancScene.mode === 0x03 ? 0x03 : 0x01,
+            adaptive: ancScene.mode === 0x01 && ancScene.subScene === 0x05,
+          };
           changed = true;
         }
         break;
       }
-      case Cmd.NoiseCancelMode: {
-        if (p.length >= 1) {
-          next = { ...next, noiseMode: p[0]! };
-          changed = true;
-        }
+      case Cmd.NoiseCancelMode:
+        // 0x0C is falsified on HT08 (ignored by the device, 2026-08-27).
+        // UI ANC state must never be derived from 0x0C packets (#71).
         break;
-      }
       case Cmd.LowLatency: {
         if (p.length >= 1) {
           next = { ...next, gameMode: parseEnable(p[0]!) };
