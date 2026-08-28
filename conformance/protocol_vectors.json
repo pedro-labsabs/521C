@@ -363,9 +363,10 @@
   ],
   "firmware": {
     "consumers": [
-      "typescript"
+      "typescript",
+      "rust-display"
     ],
-    "note": "Only the TS surface parses firmware bytes today; Rust core does not. Kept in the corpus for completeness.",
+    "note": "TypeScript parses firmware bytes into rich state; the Rust core and CLI format the first three bytes as x.y.z for display (pinned by qcy-app tests, not by this corpus). Corrected by audit #69: the previous note claimed Rust never parses firmware bytes.",
     "vectors": [
       {
         "name": "six-bytes",
@@ -393,7 +394,7 @@
     "consumers": [
       "rust"
     ],
-    "note": "SPP/RFCOMM transport mapping (issue #50): BlueZ does not expose the QCY vendor GATT service for these dual-mode earbuds on Linux; the control path is SPP (UUID 00001101) carrying the same 0xFF framing pinned above. Reads are RequestData(0xFE) exchanges. Every byte below is composed from vectors already documented in this corpus (decode 'battery-request', decode 'multi-block' battery block, firmware 'six-bytes') - no new protocol facts. HT08 on-wire confirmation is tracked in the evidence ledger.",
+    "note": "SPP/RFCOMM transport mapping (issue #50, retargeted by #52): a GENERIC backend for QCY models whose evidence may point at RFCOMM. NOT the HT08 control path - live validation proved HT08 control is BLE GATT on the separate LE identity, and HT08 SPP channel 1 only byte-ACKs frames without executing them (docs/devices/HT08.md, docs/PROTOCOL.md). Reads are RequestData(0xFE) exchanges. Every byte below is composed from vectors already documented in this corpus (decode 'battery-request', decode 'multi-block' battery block, firmware 'six-bytes') - no new protocol facts.",
     "defaultChannel": 1,
     "reads": [
       {

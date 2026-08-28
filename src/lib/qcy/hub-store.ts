@@ -222,29 +222,34 @@ function noiseToScene(mode: NoiseUiMode): AncScene {
   }
 }
 
-export function currentNoiseUi(device: DeviceLiveState): NoiseUiMode {
+export function currentNoiseUi(device: DeviceLiveState): NoiseUiMode | null {
   // Decode from the hardware-validated 0x17 AncSetting state (mode, subScene).
-  const { mode, subScene } = device.ancScene;
-  if (mode === 0x02) return "off";
-  if (mode === 0x03) return "transparency";
-  if (mode === 0x01) {
-    switch (subScene) {
-      case 0x02:
-        return "commuting";
-      case 0x03:
-        return "noisy";
-      case 0x04:
-        return "wind";
-      case 0x05:
-        return "adaptive";
-      default:
-        return "anc";
+  // Real sessions start with ancScene null; unknown stays unknown (#62).
+  const scene = device.ancScene;
+  if (scene) {
+    if (scene.mode === 0x02) return "off";
+    if (scene.mode === 0x03) return "transparency";
+    if (scene.mode === 0x01) {
+      switch (scene.subScene) {
+        case 0x02:
+          return "commuting";
+        case 0x03:
+          return "noisy";
+        case 0x04:
+          return "wind";
+        case 0x05:
+          return "adaptive";
+        default:
+          return "anc";
+      }
     }
   }
-  // Legacy 0x0C-based fallback for profiles that still report noiseMode.
+  // Legacy fallback for state that only carries a mode byte (mock initial
+  // state). Unknown (-1) yields null — never a guessed mode (#62/#71).
   if (device.noiseMode === 0x00) return "off";
   if (device.noiseMode === 0x03) return "transparency";
-  return "anc";
+  if (device.noiseMode === 0x01) return "anc";
+  return null;
 }
 
 function maskMac(mac: string, hide: boolean): string {
@@ -501,7 +506,22 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     return guard(() => transport.write(set.inEar(on ? "on" : "off")));
   },
   setWear: async (partial) => {
-    const wear = { ...get().device.wear, ...partial };
+    // Read-before-write (#62): a wear write transmits the ENTIRE settings
+    // payload, so it must merge from observed device state. While the state
+    // is unknown (real session whose read failed or is still pending) the
+    // write is refused instead of sending app defaults over device state.
+    const current = get().device.wear;
+    if (current === null) {
+      setState({
+        toast: {
+          id: toastSeq++,
+          title: "Write blocked",
+          body: "Wear settings are unknown on this device. The state read failed or is still pending; 521C will not overwrite unread device settings.",
+        },
+      });
+      return;
+    }
+    const wear = { ...current, ...partial };
     await guard(() => transport.write(set.wear(wear)));
   },
   setEq: async (named) => {
@@ -520,7 +540,22 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     );
   },
   setBinding: async (keyId, funId) => {
-    const bindings: KeyBinding[] = get().device.bindings.map((b) =>
+    // Read-before-write (#62): a mapping write transmits the ENTIRE bindings
+    // table, so it must merge from the table read off the device. While the
+    // table is unknown the write is refused instead of reprogramming every
+    // key to 521C defaults.
+    const current = get().device.bindings;
+    if (current === null) {
+      setState({
+        toast: {
+          id: toastSeq++,
+          title: "Write blocked",
+          body: "Touch mapping is unknown on this device. The read failed or is still pending; 521C will not write a default table over unread device state.",
+        },
+      });
+      return;
+    }
+    const bindings: KeyBinding[] = current.map((b) =>
       b.keyId === keyId ? { keyId, funId } : b,
     );
     await guard(() => transport.writeDirect(CHAR.keyFunctionV2, encodeKeyFunctionDirect(bindings)));
@@ -532,7 +567,9 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     // Preflight only: stage the decision for interactive confirmation. No TX here.
     const d = get().device;
     const preflight = evaluateChimePreflight(side, {
-      detectionEnabled: d.wear.enabled,
+      // Unknown wear settings (real session, read failed/pending) mean the
+      // worn signal is unreliable: preflight escalates to confirm-strong.
+      detectionEnabled: d.wear?.enabled ?? false,
       wornLeft: d.wornLeft,
       wornRight: d.wornRight,
     });
@@ -597,18 +634,32 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     if (eq) {
       const eqOk = await get().setEq(eq);
       steps.push({ step: "eq", ok: eqOk });
+    } else {
+      // An unresolvable EQ reference is a partial failure, not a silent skip
+      // (#71): the profile asked for an EQ that does not exist.
+      steps.push({ step: "eq", ok: false });
     }
     const ok = steps.every((s) => s.ok);
-    setState({ activeProfileId: id });
-    persistFrom(get);
-    if (get().notify.profileSwitch) {
-      const failed = steps.filter((s) => !s.ok).map((s) => s.step);
+    if (ok) {
+      // Only a fully applied profile becomes the active one. A partial
+      // failure must not be presented or persisted as applied (#71).
+      setState({ activeProfileId: id });
+      persistFrom(get);
+    }
+    const failed = steps.filter((s) => !s.ok).map((s) => s.step);
+    if (!ok) {
+      // Failure feedback is not preference-gated: a partial apply is always
+      // surfaced, whatever the notification settings say (#71).
       setState({
         toast: {
           id: toastSeq++,
-          title: ok ? "Profile" : "Profile partially applied",
-          body: ok ? `${profile.name} applied` : `${profile.name}: ${failed.join(", ")} not applied`,
+          title: "Profile partially applied",
+          body: `${profile.name}: ${failed.join(", ")} not applied`,
         },
+      });
+    } else if (get().notify.profileSwitch) {
+      setState({
+        toast: { id: toastSeq++, title: "Profile", body: `${profile.name} applied` },
       });
     }
     // Reconcile against the final observed device state.
@@ -733,7 +784,7 @@ async function runCliLine(line: string, get: () => HubState & HubActions): Promi
         `codec ${d.audio.codec} ${d.audio.sampleRate ?? "—"} Hz`,
         `rssi ${d.rssi} dBm`,
         `fw ${d.firmware.left}`,
-        `noise ${currentNoiseUi(d)}  game ${d.gameMode ? "on" : "off"}`,
+        `noise ${currentNoiseUi(d) ?? "unknown"}  game ${d.gameMode ? "on" : "off"}`,
       ].join("\n");
     }
     case "battery": {

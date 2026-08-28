@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { NoiseUiMode } from "./smart-profiles";
 import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_CONFIG,
@@ -118,6 +119,49 @@ describe("config schema round-trip", () => {
     const loaded = loadPersistedConfig(storage);
     expect(loaded.usedDefaults).toBe(false);
     expect(loaded.config).toEqual(cfg);
+  });
+
+  it("every NoiseUiMode member round-trips through persist -> load (#63)", () => {
+    // Exhaustive by construction: a new union member missing from this record
+    // is a compile error. This is the gap that let "wind" diverge from
+    // NOISE_MODES and reject the entire persisted config at load time.
+    const allModes: Record<NoiseUiMode, true> = {
+      off: true,
+      anc: true,
+      adaptive: true,
+      indoor: true,
+      commuting: true,
+      noisy: true,
+      wind: true,
+      transparency: true,
+    };
+    for (const mode of Object.keys(allModes) as NoiseUiMode[]) {
+      const storage = new MemStorage();
+      const cfg = validPersisted({
+        customProfiles: [validProfile({ id: `p-${mode}`, noise: mode })],
+      });
+      savePersistedConfig(storage, cfg);
+      const loaded = loadPersistedConfig(storage);
+      expect(loaded.usedDefaults, `noise mode "${mode}" rejected on load`).toBe(false);
+      expect(loaded.errors, `noise mode "${mode}" produced errors`).toEqual([]);
+      expect(loaded.config.customProfiles[0]?.noise).toBe(mode);
+      // The same payload must also survive the export/import boundary.
+      const imported = parseImport(buildExport(loaded.config));
+      expect(imported.ok, `noise mode "${mode}" rejected on import`).toBe(true);
+    }
+  });
+
+  it("a wind profile persists and reloads valid (regression, #63)", () => {
+    const storage = new MemStorage();
+    const cfg = validPersisted({
+      customProfiles: [validProfile({ id: "windy", noise: "wind" })],
+    });
+    savePersistedConfig(storage, cfg);
+    const loaded = loadPersistedConfig(storage);
+    expect(loaded.usedDefaults).toBe(false);
+    expect(loaded.config.customProfiles[0]?.noise).toBe("wind");
+    expect(loaded.config.theme).toBe(cfg.theme);
+    expect(loaded.config.customEq).toEqual(cfg.customEq);
   });
 
   it("export never includes local-only or runtime fields", () => {
@@ -271,6 +315,35 @@ describe("config schema boundaries", () => {
   it("enforces string length limits", () => {
     const r = parseExternalConfig(validExternal({ autoGameKeyword: "x".repeat(LIMITS.maxKeywordLen + 1) }));
     expect(r.ok).toBe(false);
+  });
+
+  it("measures string limits in UTF-8 bytes, matching the Rust side (#71)", () => {
+    // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes. 40 of them fit the 80-byte
+    // profile-name limit exactly; 41 exceed it in bytes while still only 41
+    // code units — the case the old UTF-16 measurement let through.
+    const atLimit = "é".repeat(LIMITS.maxNameLen / 2);
+    const overLimit = "é".repeat(LIMITS.maxNameLen / 2 + 1);
+    expect(atLimit.length).toBeLessThan(LIMITS.maxNameLen); // would pass the old check
+    const ok = parseExternalConfig(
+      validExternal({ customProfiles: [validProfile({ name: atLimit })] }),
+    );
+    expect(ok.ok).toBe(true);
+    const bad = parseExternalConfig(
+      validExternal({ customProfiles: [validProfile({ name: overLimit })] }),
+    );
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.errors[0]?.message).toContain("bytes (UTF-8)");
+    }
+    // ASCII behaves exactly as before: one byte per character.
+    const asciiOver = parseExternalConfig(
+      validExternal({ autoGameKeyword: "x".repeat(LIMITS.maxKeywordLen + 1) }),
+    );
+    expect(asciiOver.ok).toBe(false);
+    const asciiAt = parseExternalConfig(
+      validExternal({ autoGameKeyword: "x".repeat(LIMITS.maxKeywordLen) }),
+    );
+    expect(asciiAt.ok).toBe(true);
   });
 
   it("enforces sleep timer bounds on persisted config", () => {

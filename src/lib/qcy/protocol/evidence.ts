@@ -200,9 +200,8 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       firmware: null,
       readWrite: "write",
       payloadConfidence: "low",
-    capability: "ancOn",
     notes:
-      "Simple noise-cancel mode (off/ANC/outdoor/transparency). Live HT08 test unit ignored 0x0C writes on 2026-08-27 (no ACK, no audible effect) while 0x17 AncSetting writes executed; demoted pending cross-unit evidence.",
+      "Simple noise-cancel mode (off/ANC/outdoor/transparency). Live HT08 test unit ignored 0x0C writes on 2026-08-27 (no ACK, no audible effect) while 0x17 AncSetting writes executed; demoted pending cross-unit evidence. No capability link: ANC on/off is validated via 0x17 (1,1,2)/(2,0,0) on this model (issue #69).",
     },
   ],
   [
@@ -301,9 +300,8 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       firmware: null,
       readWrite: "write",
       payloadConfidence: "high",
-    capability: "ancLevels",
     notes:
-      "ANC scene: mode, subScene, noiseValue. Confirmed on live HT08 over BLE GATT 2026-08-27: writes to char 00001001 of service 0000a001 execute with notify ACK echoing the resulting state. Full mode table individually confirmed by firmware ACK: off=(2,0,0), indoor/ANC=(1,1,2), commuting=(1,2,2), noisy=(1,3,2), wind=(1,4,2) ACKed as (1,4,0), adaptive=(1,5,2) ACKed as (1,5,0), transparency=(3,2,4) ACKed as (3,2,0). Audible user confirmation (voice prompts) for off, indoor ('ANC on'), transparency and adaptive ('adaptive'); commuting/noisy/wind ACK-confirmed. Touch-sensor changes produce the same 0x17 notifications (e.g. (1,3,2)=noisy).",
+      "ANC scene: mode, subScene, noiseValue. Confirmed on live HT08 over BLE GATT 2026-08-27: writes to char 00001001 of service 0000a001 execute with notify ACK echoing the resulting state. Full mode table individually confirmed by firmware ACK: off=(2,0,0), indoor/ANC=(1,1,2), commuting=(1,2,2), noisy=(1,3,2), wind=(1,4,2) ACKed as (1,4,0), adaptive=(1,5,2) ACKed as (1,5,0), transparency=(3,2,4) ACKed as (3,2,0). Audible user confirmation (voice prompts) for off, indoor ('ANC on'), transparency and adaptive ('adaptive'); commuting/noisy/wind ACK-confirmed. Touch-sensor changes produce the same 0x17 notifications (e.g. (1,3,2)=noisy). Backs the validated scene capabilities ancOff/ancOn/ancIndoor/ancCommuting/ancNoisy/ancWind/ancAdaptive/transparency in the capability matrix — NOT ancLevels, which stays unvalidated on HT08 (issue #69).",
     },
   ],
   [
@@ -441,6 +439,8 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       firmware: null,
       readWrite: "read",
       payloadConfidence: "medium",
+    notes:
+      "Capture recorded 2026-08-27 (issue #69): notify frame ff03280101 observed 3x on the live HT08 resident session immediately after validated 0x17 AncSetting writes; interpreted as an ANC state result/ACK. Recorded in the session log and the #50 issue thread; companion record belongs in docs/devices/HT08.md.",
     },
   ],
   [
@@ -555,8 +555,8 @@ export const OPCODE_EVIDENCE: ReadonlyMap<number, OpcodeEvidence> = new Map([
       firmware: null,
       readWrite: "write",
       payloadConfidence: "medium",
-    capability: "ancAdaptive",
-    notes: "Adaptive ANC mapping experimental until captured on-device.",
+    notes:
+      "Experimental enable/disable. No capability link (issue #69): ancAdaptive on HT08 is validated via 0x17 payload (1,5,2); 0x32 EnvAdaptation is unvalidated on this model.",
     },
   ],
   [

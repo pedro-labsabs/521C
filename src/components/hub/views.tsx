@@ -64,8 +64,14 @@ export function OverviewView() {
         </Panel>
         <Panel title="Quick noise">
           <Segmented
-            value={mode === "indoor" || mode === "commuting" || mode === "noisy" ? "anc" : mode}
-            onChange={(v) => void setNoise(v)}
+            value={
+              mode === "indoor" || mode === "commuting" || mode === "noisy"
+                ? "anc"
+                : (mode ?? "")
+            }
+            onChange={(v) => {
+              if (v !== "") void setNoise(v);
+            }}
             options={[
               { id: "off" as NoiseUiMode, label: "Off" },
               { id: "anc" as NoiseUiMode, label: "ANC" },
@@ -190,17 +196,25 @@ export function NoiseView() {
         <div className="grid gap-2 text-sm">
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
             <span className="text-fg-muted">Mode byte</span>
-            <span className="font-mono">0x{device.ancScene.mode.toString(16).padStart(2, "0")}</span>
+            <span className="font-mono">
+              {device.ancScene ? `0x${device.ancScene.mode.toString(16).padStart(2, "0")}` : "—"}
+            </span>
           </div>
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
             <span className="text-fg-muted">Scene (subScene)</span>
-            <span className="font-mono">{device.ancScene.subScene}</span>
+            <span className="font-mono">{device.ancScene?.subScene ?? "—"}</span>
           </div>
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
             <span className="text-fg-muted">Noise value</span>
-            <span className="font-mono">{device.ancScene.noiseValue}</span>
+            <span className="font-mono">{device.ancScene?.noiseValue ?? "—"}</span>
           </div>
         </div>
+        {device.ancScene === null && (
+          <div className="mt-2 text-xs text-fg-subtle">
+            No ANC scene reported yet. Real sessions start unknown until the device
+            answers the 0x17 state request or a scene is written.
+          </div>
+        )}
         <div className="mt-4 rounded-lg border border-dashed border-border px-3 py-3 text-xs text-fg-muted">
           Adjustable ANC/transparency levels are not validated on the HT08: the firmware uses one
           fixed payload per scene (wind/adaptive/transparency normalize the noise value to 0).
@@ -336,12 +350,20 @@ export function ControlsView() {
   const setWear = useHub((s) => s.setWear);
   const setSleep = useHub((s) => s.setSleep);
   const setWorn = useHub((s) => s.setWorn);
-  const musicKeys = device.bindings.filter((b) => b.keyId <= 0x0a);
+  const musicKeys = (device.bindings ?? []).filter((b) => b.keyId <= 0x0a);
   const funOptions = Object.entries(FUN_LABELS);
 
   return (
     <div className="grid gap-4">
       <Panel title="Touch mapping" description="Read before write. Direct characteristic 0000000D, no 0xFF frame.">
+        {device.bindings === null && (
+          <div className="mb-2 rounded-lg border border-dashed border-border px-3 py-3 text-xs text-fg-muted">
+            Touch mapping has not been read from the device (the read failed or is
+            still pending). Editing is disabled until the current mapping is known —
+            a mapping write transmits the entire table, so 521C never writes one
+            over unread device state.
+          </div>
+        )}
         <div className="grid gap-2">
           {musicKeys.map((b) => (
             <div key={b.keyId} className="grid grid-cols-[1fr_1fr] items-center gap-3 rounded-lg bg-bg px-3 py-2">
@@ -364,16 +386,26 @@ export function ControlsView() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Wear detection">
           <Row label="Enabled" hint="Opcode 0x06 / 0x2C">
-            <Toggle checked={device.wear.enabled} onChange={(v) => void setWear({ enabled: v })} />
+            <Toggle
+              checked={device.wear?.enabled === true}
+              disabled={device.wear === null}
+              onChange={(v) => void setWear({ enabled: v })}
+            />
           </Row>
           <Row label="In-ear sensor">
             <Toggle checked={device.inEar} onChange={(v) => void setInEar(v)} />
           </Row>
           <Row label="Simulate left worn">
-            <Toggle checked={device.wornLeft} onChange={(v) => setWorn(v, device.wornRight)} />
+            <Toggle
+              checked={device.wornLeft === true}
+              onChange={(v) => setWorn(v, device.wornRight ?? false)}
+            />
           </Row>
           <Row label="Simulate right worn">
-            <Toggle checked={device.wornRight} onChange={(v) => setWorn(device.wornLeft, v)} />
+            <Toggle
+              checked={device.wornRight === true}
+              onChange={(v) => setWorn(device.wornLeft ?? false, v)}
+            />
           </Row>
         </Panel>
         <Panel title="Sleep mode" description="Locks gestures, keeps audio. Opcode 0x10.">

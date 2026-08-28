@@ -79,10 +79,19 @@ const CHAR_IFACE: &str = "org.bluez.GattCharacteristic1";
 const TRANSPORT_IFACE: &str = "org.bluez.MediaTransport1";
 
 /// UUID prefixes (lowercase, 16-bit form inside the full 128-bit UUID) for
-/// profiles that carry SCO: HSP headset/gateway and HFP handsfree/gateway.
-/// A2DP source/sink are intentionally excluded — music playback does not
-/// block LE.
-const SCO_UUID_PREFIXES: &[&str] = &["00001108", "00001109", "0000111e", "0000111f"];
+/// profiles that carry SCO: HSP (both roles) and HFP (both roles), per the
+/// Bluetooth SIG assigned numbers — 0x1108 Headset, 0x1112 Headset Audio
+/// Gateway, 0x111E Handsfree, 0x111F Handsfree Audio Gateway, 0x1131
+/// Headset HS. The previous list carried 0x1109 (Cordless Telephony — not a
+/// headset profile) and missed 0x1112/0x1131 (audit #67). A2DP source/sink
+/// are intentionally excluded — music playback does not block LE.
+const SCO_UUID_PREFIXES: &[&str] = &[
+    "00001108", // Headset (HSP)
+    "00001112", // Headset Audio Gateway (HSP AG)
+    "0000111e", // Handsfree (HFP)
+    "0000111f", // Handsfree Audio Gateway (HFP AG)
+    "00001131", // Headset HS (HSP HS role)
+];
 
 /// Scan managed objects for a MediaTransport1 in `active`/`pending` state
 /// whose UUID is an HFP/HSP (SCO) profile. Returns the owning device path.
@@ -130,6 +139,11 @@ pub struct BlueZTransport {
     /// device's advertised name. Unknown models stay read-only: writes are denied
     /// even though the configured policy is the HT08 one.
     connected_model_known: bool,
+    /// Address of the device object that actually holds the live session. After
+    /// the dual-mode fallback this can differ from the address the caller asked
+    /// for; the application layer must correlate attestations with THIS address,
+    /// not with the requested one (audit #67).
+    connected_address: Option<String>,
     /// Bounded discovery windows (injectable so tests run without real waits).
     pub(crate) scan_window: Duration,
     pub(crate) le_fallback_window: Duration,
@@ -156,6 +170,7 @@ impl BlueZTransport {
             device_path: None,
             chars: HashMap::new(),
             connected_model_known: false,
+            connected_address: None,
             scan_window: SCAN_WINDOW,
             le_fallback_window: LE_FALLBACK_WINDOW,
         }
@@ -241,7 +256,12 @@ impl BlueZTransport {
             }
             if let Some(uuid) = Self::prop_str(obj, SERVICE_IFACE, "UUID") {
                 if uuid.eq_ignore_ascii_case(SERVICE_MAIN) {
-                    service_path = Some(obj.path.clone());
+                    // Audit #67: deterministic tie-break — the object order in
+                    // ManagedObjects is not contractual; pick the lowest path.
+                    match &service_path {
+                        Some(cur) if cur.as_str() <= obj.path.as_str() => {}
+                        _ => service_path = Some(obj.path.clone()),
+                    }
                 }
             }
         }
@@ -255,8 +275,17 @@ impl BlueZTransport {
                 continue;
             }
             if let Some(uuid) = Self::prop_str(obj, CHAR_IFACE, "UUID") {
-                self.chars
-                    .insert(uuid.to_ascii_lowercase(), obj.path.clone());
+                // Audit #67: duplicate characteristic UUIDs (observed on HT08:
+                // 00001001/00001002 appear under two services) resolve
+                // deterministically to the lexicographically lowest object
+                // path instead of whichever object the bus listed last.
+                let key = uuid.to_ascii_lowercase();
+                match self.chars.get(&key) {
+                    Some(cur) if cur.as_str() <= obj.path.as_str() => {}
+                    _ => {
+                        self.chars.insert(key, obj.path.clone());
+                    }
+                }
             }
         }
         Ok(())
@@ -294,6 +323,7 @@ impl BlueZTransport {
         let path = self.device_path.take();
         self.chars.clear();
         self.connected_model_known = false;
+        self.connected_address = None;
         if let Some(path) = path {
             let _ = self.bus.device_disconnect(&path);
         }
@@ -337,14 +367,26 @@ impl BlueZTransport {
             }
         }
         self.device_path = Some(path.to_string());
+        self.connected_address = self.device_address_of(path);
         self.connected_model_known = self.device_model_known(path);
         if let Err(e) = self.resolve_chars() {
             self.device_path = None;
             self.chars.clear();
             self.connected_model_known = false;
+            self.connected_address = None;
             return Err(e);
         }
         Ok(())
+    }
+
+    /// The device object's own `Address` property, if present.
+    fn device_address_of(&self, path: &str) -> Option<String> {
+        let objects = self.bus.managed_objects().ok()?;
+        objects
+            .iter()
+            .find(|obj| obj.path == path)
+            .and_then(|obj| Self::prop_str(obj, DEVICE_IFACE, "Address"))
+            .map(|s| s.to_string())
     }
 
     /// Bounded discovery for a BLE identity carrying the vendor GATT service.
@@ -394,6 +436,18 @@ impl BlueZTransport {
                 tried.insert(address.clone());
                 let path = device_path(&self.adapter, &address);
                 if self.try_connect_path(&path).is_ok() {
+                    if !address.eq_ignore_ascii_case(original_address) {
+                        // Audit #67: this session was reached through a
+                        // same-name/vendor-service fallback to a DIFFERENT
+                        // identity than the one requested. A matching display
+                        // name alone does not prove the model — someone
+                        // else's earbuds with the same alias would match too,
+                        // and writes would then go to the wrong device. The
+                        // session stays read-only until the user explicitly
+                        // attests the connected identity; the app layer can
+                        // correlate via `session_address()`.
+                        self.connected_model_known = false;
+                    }
                     connected = true;
                     break;
                 }
@@ -406,13 +460,8 @@ impl BlueZTransport {
         let _ = self.bus.stop_discovery(&self.adapter);
         connected
     }
-}
 
-impl Transport for BlueZTransport {
-    fn scan(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
-        self.bus.start_discovery(&self.adapter)?;
-        // Bounded discovery: BlueZ reports devices asynchronously, so watch the
-        // object tree for a window instead of trusting a single instant snapshot.
+    fn scan_window_collect(&mut self) -> Result<HashMap<String, DiscoveredDevice>, TransportError> {
         let deadline = Instant::now() + self.scan_window;
         let mut best: HashMap<String, DiscoveredDevice> = HashMap::new();
         let mut first_seen: Option<Instant> = None;
@@ -431,8 +480,21 @@ impl Transport for BlueZTransport {
             }
             std::thread::sleep(DISCOVERY_POLL);
         }
+        Ok(best)
+    }
+}
+
+impl Transport for BlueZTransport {
+    fn scan(&mut self) -> Result<Vec<DiscoveredDevice>, TransportError> {
+        self.bus.start_discovery(&self.adapter)?;
+        // Bounded discovery: BlueZ reports devices asynchronously, so watch the
+        // object tree for a window instead of trusting a single instant snapshot.
+        let result = self.scan_window_collect();
+        // Audit #67: always stop discovery, also when the object-tree read
+        // failed mid-window — a leaked discovery session keeps the radio
+        // scanning and skews later connect windows.
         self.bus.stop_discovery(&self.adapter)?;
-        let mut out: Vec<DiscoveredDevice> = best.into_values().collect();
+        let mut out: Vec<DiscoveredDevice> = result?.into_values().collect();
         out.sort_by(|a, b| a.address.cmp(&b.address));
         Ok(out)
     }
@@ -507,6 +569,13 @@ impl Transport for BlueZTransport {
         if self.find_le_identity(address, original_name.as_deref()) {
             return Ok(());
         }
+        // Audit #67: HFP/SCO may have been grabbed between the preflight and
+        // the fallback attempts (e.g. the user answered a call while the
+        // scan window ran). Re-check so the race surfaces as the actionable
+        // HfpBlocked diagnostic instead of a bare NotFound.
+        if let Some(holder) = self.bus.active_hfp_transport()? {
+            return Err(TransportError::HfpBlocked(format!(" ({holder})")));
+        }
         match primary {
             Err(TransportError::NotFound(what)) => Err(TransportError::NotFound(format!(
                 "{what} for {address}; if these earbuds are paired for audio only, their                  BLE identity may be asleep — open the charging case or disconnect the                  audio, then scan and connect again"
@@ -519,9 +588,14 @@ impl Transport for BlueZTransport {
         if let Some(path) = self.device_path.take() {
             self.chars.clear();
             self.connected_model_known = false;
+            self.connected_address = None;
             self.bus.device_disconnect(&path)?;
         }
         Ok(())
+    }
+
+    fn session_address(&mut self) -> Option<String> {
+        self.connected_address.clone()
     }
 
     fn is_connected(&mut self) -> Result<bool, TransportError> {
@@ -612,10 +686,12 @@ pub struct ZbusBlueZBus {
 
 #[cfg(feature = "bluez")]
 impl ZbusBlueZBus {
-    /// Connect to the system bus. Fails with [`TransportError::AdapterOff`] when no
-    /// system bus is reachable.
+    /// Connect to the system bus. A failure here means the D-Bus system bus
+    /// itself is unreachable — not that the Bluetooth adapter is off — so it
+    /// maps to [`TransportError::Bus`] with the underlying cause (audit #67).
     pub fn system() -> Result<Self, TransportError> {
-        let conn = zbus::blocking::Connection::system().map_err(|_| TransportError::AdapterOff)?;
+        let conn = zbus::blocking::Connection::system()
+            .map_err(|e| TransportError::Bus(format!("system D-Bus unreachable: {e}")))?;
         Ok(Self { conn })
     }
 
@@ -814,6 +890,10 @@ mod tests {
         /// Every path passed to `Device1.Connect`, in call order (shared so
         /// tests can assert on it after the bus is moved into the transport).
         connect_calls: Arc<Mutex<Vec<String>>>,
+        /// Fail every `managed_objects` call (audit #67 discovery-leak test).
+        fail_managed_objects: bool,
+        /// Discovery start/stop calls, in order (audit #67).
+        discovery_calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
     fn obj(path: &str, iface: &str, props: Vec<(&str, PropValue)>) -> BlueZObject {
@@ -870,12 +950,23 @@ mod tests {
 
     impl BlueZBus for FakeBus {
         fn managed_objects(&self) -> Result<Vec<BlueZObject>, TransportError> {
+            if self.fail_managed_objects {
+                return Err(TransportError::Bus("managed_objects failed".into()));
+            }
             Ok(self.objects.lock().expect("objects mutex").clone())
         }
         fn start_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
+            self.discovery_calls
+                .lock()
+                .expect("discovery mutex")
+                .push("start");
             Ok(())
         }
         fn stop_discovery(&self, _adapter: &str) -> Result<(), TransportError> {
+            self.discovery_calls
+                .lock()
+                .expect("discovery mutex")
+                .push("stop");
             Ok(())
         }
         fn device_connect(&self, p: &str) -> Result<(), TransportError> {
@@ -1377,6 +1468,118 @@ mod tests {
     }
 
     #[test]
+    fn fallback_to_a_different_identity_does_not_prove_the_model() {
+        // Audit #67: the requested BR/EDR object has no GATT; the fallback
+        // connects a DIFFERENT same-name identity. Even a model-looking name
+        // on that identity must not authorize writes — the user attests the
+        // connected identity explicitly (correlated via session_address).
+        let mut objects = Vec::new();
+        objects.push(obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA",
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("84:AC:60:62:69:DA".into())),
+                ("Alias", PropValue::Str("QCY MeloBuds Pro".into())),
+            ],
+        ));
+        let le = "/org/bluez/hci0/dev_C4_AC_60_62_69_DB";
+        let svc = format!("{le}/service0001");
+        objects.push(obj(
+            le,
+            DEVICE_IFACE,
+            vec![
+                ("Address", PropValue::Str("C4:AC:60:62:69:DB".into())),
+                ("Alias", PropValue::Str("QCY MeloBuds Pro".into())),
+            ],
+        ));
+        objects.push(obj(
+            &svc,
+            SERVICE_IFACE,
+            vec![("UUID", PropValue::Str(crate::policy::SERVICE_MAIN.into()))],
+        ));
+        objects.push(obj(
+            &format!("{svc}/char0001"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        let (mut t, _writes) = transport(objects);
+        t.connect("84:AC:60:62:69:DA").unwrap();
+        assert_eq!(
+            t.session_address().as_deref(),
+            Some("C4:AC:60:62:69:DB"),
+            "session_address must expose the fallback identity for attestation correlation"
+        );
+        let frame = qcy_protocol::packet::encode_command(0x09, &[0x01]).unwrap();
+        assert!(
+            matches!(
+                t.write(&frame),
+                Err(TransportError::Denied(
+                    crate::policy::Denial::ReadOnlyDevice
+                ))
+            ),
+            "name-only fallback to a different identity stays read-only"
+        );
+        t.attest_model_known();
+        t.write(&frame).unwrap();
+    }
+
+    #[test]
+    fn duplicate_characteristic_uuids_resolve_to_the_lowest_path() {
+        // Audit #67: HT08 exposes duplicate characteristic UUIDs across two
+        // services; resolution must be deterministic (lowest object path),
+        // not "whichever object the bus listed last".
+        let dev = "/org/bluez/hci0/dev_F8_5C_7D_12_08_08";
+        let svc = format!("{dev}/service0001");
+        let mut objects = ht08_fixture();
+        // A duplicate command-write char on a HIGHER path and one on a LOWER
+        // path: the lower one must win regardless of insertion order.
+        objects.push(obj(
+            &format!("{svc}/char9999"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        objects.push(obj(
+            &format!("{svc}/char0000"),
+            CHAR_IFACE,
+            vec![(
+                "UUID",
+                PropValue::Str(crate::policy::CHAR_COMMAND_WRITE.into()),
+            )],
+        ));
+        let (mut t, writes) = transport(objects);
+        t.scan_window = Duration::ZERO;
+        t.le_fallback_window = Duration::ZERO;
+        t.connect("F8:5C:7D:12:08:08").unwrap();
+        t.attest_model_known();
+        let frame = qcy_protocol::packet::encode_command(0x09, &[0x01]).unwrap();
+        t.write(&frame).unwrap();
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes[0].0, format!("{svc}/char0000"));
+    }
+
+    #[test]
+    fn scan_stops_discovery_even_when_the_object_tree_read_fails() {
+        // Audit #67: a mid-window managed_objects failure must not leak a
+        // running discovery session.
+        let bus = FakeBus {
+            fail_managed_objects: true,
+            discovery_calls: Arc::new(Mutex::new(Vec::new())),
+            ..Default::default()
+        };
+        let calls = bus.discovery_calls.clone();
+        let mut t = BlueZTransport::new(Box::new(bus), WritePolicy::ht08());
+        t.scan_window = Duration::ZERO;
+        assert!(t.scan().is_err());
+        assert_eq!(calls.lock().unwrap().as_slice(), &["start", "stop"]);
+    }
+
+    #[test]
     fn connect_without_gatt_or_candidates_reports_actionable_error() {
         // Only the BR/EDR object exists and nothing else qualifies as a BLE
         // identity: the error must tell the user how to wake the BLE side.
@@ -1596,6 +1799,55 @@ mod tests {
         ));
         let (mut t, _writes) = transport(objects);
         t.connect("F8:5C:7D:12:08:08").unwrap();
+    }
+
+    /// MediaTransport1 fixture with an arbitrary UUID prefix.
+    fn transport_obj_with_uuid(state: &str, uuid16: &str) -> BlueZObject {
+        obj(
+            "/org/bluez/hci0/dev_84_AC_60_62_69_DA/fd9",
+            TRANSPORT_IFACE,
+            vec![
+                (
+                    "UUID",
+                    PropValue::Str(format!("{uuid16}-0000-1000-8000-00805f9b34fb")),
+                ),
+                ("State", PropValue::Str(state.into())),
+                (
+                    "Device",
+                    PropValue::Str("/org/bluez/hci0/dev_84_AC_60_62_69_DA".into()),
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn sco_uuid_set_matches_the_sig_assigned_hsp_hfp_profiles() {
+        // Audit #67: pin the exact blocking set. 0x1109 (Cordless Telephony)
+        // must NOT block; 0x1112 (HSP AG) and 0x1131 (Headset HS) must.
+        for blocking in ["00001108", "00001112", "0000111e", "0000111f", "00001131"] {
+            let mut objects = ht08_fixture();
+            objects.retain(|o| !o.path.contains("service"));
+            objects.push(transport_obj_with_uuid("active", blocking));
+            let (mut t, _writes, _calls) = transport_with_calls(objects);
+            assert!(
+                matches!(
+                    t.connect("F8:5C:7D:12:08:08"),
+                    Err(TransportError::HfpBlocked(_))
+                ),
+                "{blocking} must block LE initiation"
+            );
+        }
+        for non_blocking in ["00001109", "0000110b", "0000110a", "0000110d"] {
+            // Services stay: a successful primary connect proves the active
+            // transport did not block.
+            let mut objects = ht08_fixture();
+            objects.push(transport_obj_with_uuid("active", non_blocking));
+            let (mut t, _writes, _calls) = transport_with_calls(objects);
+            assert!(
+                t.connect("F8:5C:7D:12:08:08").is_ok(),
+                "{non_blocking} must not block LE initiation"
+            );
+        }
     }
 
     #[test]
