@@ -407,6 +407,10 @@ impl Transport for RfcommTransport {
     fn is_connected(&mut self) -> Result<bool, TransportError> {
         Ok(self.socket.is_some())
     }
+
+    fn session_address(&mut self) -> Option<String> {
+        self.connected_address.clone()
+    }
 }
 
 /* ------------------------------------------------------------------ */

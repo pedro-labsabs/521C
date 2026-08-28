@@ -40,7 +40,7 @@ const SUPPORTED_OPCODES: &[u8] = &[
 /// Opcodes the ledger records as `write-experimental` (need a session opt-in).
 const EXPERIMENTAL_OPCODES: &[u8] = &[
     0x0C, // NoiseCancelMode — falsified on live HT08 (#52/#53): writes ignored,
-          // no ACK; ANC state uses the validated 0x17 scene table instead.
+    // no ACK; ANC state uses the validated 0x17 scene table instead.
     0x23, // Ldac
     0x2D, // SpatialAudio
     0x32, // EnvAdaptation
