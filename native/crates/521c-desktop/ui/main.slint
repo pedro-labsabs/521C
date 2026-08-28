@@ -41,7 +41,9 @@ export global AppState {
     in-out property <int> noise-mode: -1; // -1 unknown, 0 off, 1 anc, 2 adaptive, 3 commuting, 4 noisy, 5 wind, 6 transparency
     in-out property <bool> game-mode: false;
     in-out property <bool> sleep-mode: false;
-    in-out property <bool> in-ear-detection: true;
+    // Unknown until the device reports it (#71): never assume on by default —
+    // the same stale-default class noise-mode=-1 fixed in #58.
+    in-out property <bool> in-ear-detection: false;
 
     // Host services
     in-out property <string> media-title: "—";
@@ -102,7 +104,10 @@ export component MainWindow inherits Window {
                 border-radius: 4px;
                 background: AppState.mock-mode ? #7a5c00 : #1d4ed8;
                 badge := Text {
-                    text: AppState.mock-mode ? "MOCK transport (development)" : "BlueZ transport";
+                    // transport-badge is the source of truth (#66): it also
+                    // distinguishes the explicit mock from the BlueZ-unavailable
+                    // fallback, which mock-mode alone cannot express.
+                    text: AppState.transport-badge;
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;
