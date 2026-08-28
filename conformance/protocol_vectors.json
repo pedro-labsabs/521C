@@ -411,5 +411,36 @@
         "expectHex": "010402010402"
       }
     ]
+  },
+  "writePolicy": {
+    "note": "HT08 write-authorization surface, mirrored from the canonical evidence ledger (src/lib/qcy/protocol/evidence.ts). Both policy implementations (src/lib/qcy/policy.ts and native/crates/qcy-transport/src/policy.rs) must pin these sets. Added by the 2026-08-28 audit (#59) after the Rust allowlist drifted from the ledger's #53 demotion of 0x0C.",
+    "ht08": {
+      "supported": [
+        "05",
+        "06",
+        "09",
+        "10",
+        "16",
+        "17",
+        "22",
+        "2c",
+        "3d"
+      ],
+      "experimental": [
+        "0c",
+        "23",
+        "2d",
+        "32"
+      ],
+      "destructive": [
+        "01",
+        "02",
+        "03"
+      ],
+      "directChars": [
+        "0000000b-0000-1000-8000-00805f9b34fb",
+        "0000000d-0000-1000-8000-00805f9b34fb"
+      ]
+    }
   }
 }
