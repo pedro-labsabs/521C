@@ -22,7 +22,7 @@ use qcy_app::core::{
 };
 use qcy_host::codec::{BluezCodecSource, CodecInfo, CodecSource, UnknownCodecSource};
 #[cfg(feature = "bluez")]
-use qcy_host::game_mode::{GameModeSignal, MprisPresenceSignal};
+use qcy_host::game_mode::{GameModeEvent, GameModeSignal, MprisPresenceSignal};
 use qcy_host::mpris::{MediaAction, MprisHost};
 use qcy_host::system_eq::{MockSystemEq, PipewireSystemEq, SystemEq, SystemEqStatus};
 use qcy_transport::{DiscoveredDevice, Transport, WritePolicy};
@@ -54,6 +54,121 @@ fn append_log(current: &str, line: &str) -> String {
         lines.drain(0..drop);
     }
     lines.join("\n")
+}
+
+/// The transport backend the process is actually running (#66). The UI must
+/// always say which one: a silent mock fallback behind a "BlueZ" badge
+/// violates the capability-honesty contract.
+#[derive(Debug, Clone, PartialEq)]
+enum TransportBackend {
+    BlueZ,
+    MockExplicit,
+    /// BlueZ was requested but the bus is unreachable; the app runs on the
+    /// mock instead and says so in the badge and status line.
+    MockFallback {
+        reason: String,
+    },
+}
+
+impl TransportBackend {
+    fn is_mock(&self) -> bool {
+        !matches!(self, Self::BlueZ)
+    }
+
+    /// Badge text (source of truth for the UI badge, #66).
+    fn badge(&self) -> &'static str {
+        match self {
+            Self::BlueZ => "BlueZ transport",
+            Self::MockExplicit => "MOCK transport (development)",
+            Self::MockFallback { .. } => "MOCK transport (BlueZ unavailable)",
+        }
+    }
+
+    fn status_line(&self) -> String {
+        match self {
+            Self::BlueZ => {
+                "BlueZ transport: checking for already-connected earbuds (scan to find others)."
+                    .into()
+            }
+            Self::MockExplicit => {
+                "MOCK transport: deterministic development backend, not real hardware.".into()
+            }
+            Self::MockFallback { reason } => format!(
+                "Mock transport (BlueZ unavailable: {reason}); all device interactions are simulated."
+            ),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::BlueZ => "bluez",
+            Self::MockExplicit | Self::MockFallback { .. } => "mock",
+        }
+    }
+}
+
+/// Auto Game Mode reconcile is edge-triggered (#64d): only the
+/// disconnected->connected transition re-sends the desired game mode.
+/// Keepalive/noise snapshots while already connected must not re-write the
+/// low-latency command every 30 s.
+fn should_reconcile_game_mode(
+    was_connected: bool,
+    is_connected: bool,
+    auto_game_enabled: bool,
+    desired: bool,
+) -> bool {
+    auto_game_enabled && desired && is_connected && !was_connected
+}
+
+/// Status line for a `StateChanged` snapshot, or `None` while a
+/// resident-session reconnect is in progress (#64c): the "reconnecting in
+/// background" line must survive the `StateChanged` that immediately follows
+/// `SessionLost` and every later snapshot until restore or terminal failure.
+fn snapshot_status_line(reconnecting: bool, connected: bool) -> Option<&'static str> {
+    if reconnecting {
+        None
+    } else if connected {
+        Some("Connected.")
+    } else {
+        Some("Disconnected.")
+    }
+}
+
+/// Whether an `Error` event ends the reconnecting state (#64c). Re-bootstrap
+/// progress reports are not terminal: the supervisor is still retrying.
+fn is_terminal_error(message: &str) -> bool {
+    !message.starts_with("re-bootstrap:")
+}
+
+/// Optimistic UI toggles that roll back when their write fails (#71).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToggleKind {
+    GameMode,
+    SleepMode,
+    InEarDetection,
+}
+
+/// The core tags toggle write results with the feature name ("game mode ...",
+/// "sleep mode ...", "in-ear detection ..."; #71) so the UI can roll back
+/// exactly the optimistic toggle that failed.
+fn toggle_for_message(message: &str) -> Option<ToggleKind> {
+    if message.starts_with("game mode") {
+        Some(ToggleKind::GameMode)
+    } else if message.starts_with("sleep mode") {
+        Some(ToggleKind::SleepMode)
+    } else if message.starts_with("in-ear detection") {
+        Some(ToggleKind::InEarDetection)
+    } else {
+        None
+    }
+}
+
+fn rollback_toggle(state: &AppState, kind: ToggleKind, prev: bool) {
+    match kind {
+        ToggleKind::GameMode => state.set_game_mode(prev),
+        ToggleKind::SleepMode => state.set_sleep_mode(prev),
+        ToggleKind::InEarDetection => state.set_in_ear_detection(prev),
+    }
 }
 
 fn codec_text(info: &CodecInfo) -> String {
@@ -257,13 +372,32 @@ fn main() {
         );
     }
 
-    let transport = match build_transport(mock) {
-        Ok(t) => t,
+    // #66: a BlueZ failure must never hide behind a "BlueZ transport" badge.
+    // The fallback is loud on stderr AND visible in the UI (badge + status),
+    // and the whole app switches to mock semantics (host services, no
+    // auto-attach, no auto game) to match the backend actually running.
+    let (transport, backend) = match build_transport(mock) {
+        Ok(t) => (
+            t,
+            if mock {
+                TransportBackend::MockExplicit
+            } else {
+                TransportBackend::BlueZ
+            },
+        ),
         Err(e) => {
-            eprintln!("521c: falling back to mock transport: {e}");
-            Box::new(qcy_transport::mock::MockTransport::new(WritePolicy::ht08()))
+            eprintln!(
+                "521c: WARNING: BlueZ transport unavailable ({e}); falling back to the MOCK transport. \
+All device interactions are simulated. Start with --mock to make this explicit."
+            );
+            (
+                Box::new(qcy_transport::mock::MockTransport::new(WritePolicy::ht08()))
+                    as Box<dyn Transport + Send>,
+                TransportBackend::MockFallback { reason: e },
+            )
         }
     };
+    let mock = backend.is_mock();
     let host = build_host_services(mock);
     let mut handle = AppCore::start(transport, host, loaded.config.known_devices.clone());
 
@@ -290,21 +424,60 @@ fn main() {
         std::thread::Builder::new()
             .name("521c-auto-game".into())
             .spawn(move || {
-                let Ok(mut signal) = MprisPresenceSignal::session() else {
-                    eprintln!("521c: auto game mode unavailable (no D-Bus session bus)");
-                    return;
-                };
+                // Signal events flow through a channel so the controller loop
+                // can wait with a TIMEOUT while a cooldown-suppressed
+                // transition is pending (#65): the retry must not depend on a
+                // fresh MPRIS event that may never come.
+                let (event_tx, event_rx) = std::sync::mpsc::channel::<GameModeEvent>();
+                std::thread::Builder::new()
+                    .name("521c-auto-game-signal".into())
+                    .spawn(move || {
+                        let Ok(mut signal) = MprisPresenceSignal::session() else {
+                            eprintln!("521c: auto game mode unavailable (no D-Bus session bus)");
+                            return;
+                        };
+                        while let Some(event) = signal.next_event() {
+                            if event_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("auto game signal thread spawns");
+
                 let mut controller = qcy_host::game_mode::GameModeController::new(
                     qcy_host::game_mode::GameModeRule::new(vec![keyword]),
                     AUTO_GAME_COOLDOWN,
                 );
-                while let Some(event) = signal.next_event() {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let decision = controller.handle(event, now_ms);
-                    desired.store(controller.is_on(), Ordering::SeqCst);
+                // Monotonic clock (#65): the controller contract is monotonic
+                // milliseconds; wall-clock steps (NTP) must not extend or skip
+                // cooldowns via saturating_sub.
+                let epoch = std::time::Instant::now();
+                let now_ms = || epoch.elapsed().as_millis() as u64;
+                loop {
+                    let event = match controller.pending_retry_at_ms() {
+                        Some(retry_at) => {
+                            let wait = Duration::from_millis(retry_at.saturating_sub(now_ms()));
+                            match event_rx.recv_timeout(wait) {
+                                Ok(event) => Some(event),
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        None => match event_rx.recv() {
+                            Ok(event) => Some(event),
+                            Err(_) => break,
+                        },
+                    };
+                    let decision = match event {
+                        Some(event) => controller.handle(event, now_ms()),
+                        // Cooldown expired with no new event: apply the
+                        // pending transition (#65).
+                        None => controller.reevaluate(now_ms()),
+                    };
+                    // Reconcile state is the DESIRED state, not the applied
+                    // one (#65): a cooldown-suppressed off must not be
+                    // re-sent as "on" after a later reconnect.
+                    desired.store(controller.desired(), Ordering::SeqCst);
                     if decision.changed && connected.load(Ordering::SeqCst) {
                         let _ = sender.send(AppCommand::SetGameMode(decision.game_mode_on));
                     }
@@ -316,18 +489,23 @@ fn main() {
     let app = MainWindow::new().expect("Slint window creates");
     let state = app.global::<AppState>();
     state.set_mock_mode(mock);
-    state.set_transport_badge(if mock { "mock".into() } else { "bluez".into() });
-    state.set_status_line(
-        if mock {
-            "MOCK transport: deterministic development backend, not real hardware."
-        } else {
-            "BlueZ transport: checking for already-connected earbuds (scan to find others)."
-        }
-        .into(),
-    );
+    state.set_transport_badge(backend.badge().into());
+    state.set_status_line(backend.status_line().into());
 
     // Discovered devices shared between the event pump and UI callbacks.
     let devices: Arc<Mutex<Vec<DiscoveredDevice>>> = Arc::default();
+
+    // #64c: protects the "reconnecting in background" status line. Set on
+    // SessionLost; cleared on SessionRestored, on terminal errors, and on
+    // explicit user connect/disconnect.
+    let reconnecting: Arc<AtomicBool> = Arc::default();
+    // #64d: previous connected state, so the auto-game reconcile fires only
+    // on the disconnected->connected edge, not on every snapshot.
+    let prev_connected: Arc<AtomicBool> = Arc::default();
+    // #71: the optimistic toggle awaiting its write result (kind, value
+    // before the user flipped it). Rolled back when the core reports the
+    // tagged write failure.
+    let pending_toggle: Arc<Mutex<Option<(ToggleKind, bool)>>> = Arc::default();
 
     // ---- UI callbacks -> typed commands ------------------------------------
     let sender = handle.commands.clone();
@@ -337,7 +515,10 @@ fn main() {
     {
         let devices = Arc::clone(&devices);
         let sender = handle.commands.clone();
+        let reconnecting = Arc::clone(&reconnecting);
         app.on_connect_clicked(move |index| {
+            // A fresh user connect supersedes any background recovery (#64c).
+            reconnecting.store(false, Ordering::SeqCst);
             let list = devices.lock().expect("devices mutex");
             if let Some(dev) = list.get(index as usize) {
                 let _ = sender.send(AppCommand::Connect(dev.address.clone()));
@@ -346,7 +527,10 @@ fn main() {
     }
     {
         let sender = handle.commands.clone();
+        let reconnecting = Arc::clone(&reconnecting);
         app.on_disconnect_clicked(move || {
+            // Explicit user disconnect ends the recovery state (#64c).
+            reconnecting.store(false, Ordering::SeqCst);
             let _ = sender.send(AppCommand::Disconnect);
         });
     }
@@ -392,19 +576,30 @@ fn main() {
     }
     {
         let sender = handle.commands.clone();
+        let pending_toggle = Arc::clone(&pending_toggle);
         app.on_game_mode_changed(move |on| {
+            // Optimistic flip recorded for rollback on write failure (#71);
+            // a switch only fires on change, so the previous value is !on.
+            *pending_toggle.lock().expect("pending toggle mutex") =
+                Some((ToggleKind::GameMode, !on));
             let _ = sender.send(AppCommand::SetGameMode(on));
         });
     }
     {
         let sender = handle.commands.clone();
+        let pending_toggle = Arc::clone(&pending_toggle);
         app.on_sleep_mode_changed(move |on| {
+            *pending_toggle.lock().expect("pending toggle mutex") =
+                Some((ToggleKind::SleepMode, !on));
             let _ = sender.send(AppCommand::SetSleepMode(on));
         });
     }
     {
         let sender = handle.commands.clone();
+        let pending_toggle = Arc::clone(&pending_toggle);
         app.on_in_ear_changed(move |on| {
+            *pending_toggle.lock().expect("pending toggle mutex") =
+                Some((ToggleKind::InEarDetection, !on));
             let _ = sender.send(AppCommand::SetInEarDetection(on));
         });
     }
@@ -477,6 +672,9 @@ fn main() {
     let connected_pump = Arc::clone(&connected_flag);
     let desired_pump = Arc::clone(&auto_game_desired);
     let config_pump = Arc::clone(&shared_config);
+    let reconnecting_pump = Arc::clone(&reconnecting);
+    let prev_connected_pump = Arc::clone(&prev_connected);
+    let pending_toggle_pump = Arc::clone(&pending_toggle);
     let pump_commands = handle.commands.clone();
     let weak = app.as_weak();
     std::thread::Builder::new()
@@ -487,6 +685,9 @@ fn main() {
                 let connected_flag = Arc::clone(&connected_pump);
                 let config = Arc::clone(&config_pump);
                 let auto_game_desired = Arc::clone(&desired_pump);
+                let reconnecting = Arc::clone(&reconnecting_pump);
+                let prev_connected = Arc::clone(&prev_connected_pump);
+                let pending_toggle = Arc::clone(&pending_toggle_pump);
                 let sender = pump_commands.clone();
                 let weak = weak.clone();
                 let ok = slint::invoke_from_event_loop(move || {
@@ -521,25 +722,34 @@ fn main() {
                             );
                         }
                         AppEvent::StateChanged(snapshot) => {
+                            let was_connected =
+                                prev_connected.swap(snapshot.connected, Ordering::SeqCst);
                             apply_snapshot(&state, &snapshot);
                             connected_flag.store(snapshot.connected, Ordering::SeqCst);
-                            // Reconcile Auto Game Mode on (re)connect: if a matching
-                            // player is present, bring game mode on. Desired-off never
-                            // forces the device, so manual settings survive reconnects.
-                            if snapshot.connected
-                                && auto_game_enabled
-                                && auto_game_desired.load(Ordering::SeqCst)
-                            {
+                            // Reconcile Auto Game Mode only on the
+                            // disconnected->connected edge (#64d): keepalive and
+                            // noise snapshots while already connected must not
+                            // re-send the low-latency write. Desired-off never
+                            // forces the device, so manual settings survive
+                            // reconnects.
+                            if should_reconcile_game_mode(
+                                was_connected,
+                                snapshot.connected,
+                                auto_game_enabled,
+                                auto_game_desired.load(Ordering::SeqCst),
+                            ) {
                                 let _ = sender.send(AppCommand::SetGameMode(true));
                             }
-                            state.set_status_line(
-                                (if snapshot.connected {
-                                    "Connected."
-                                } else {
-                                    "Disconnected."
-                                })
-                                .into(),
-                            );
+                            // While a background reconnect is in progress the
+                            // recovery status line wins (#64c): SessionLost is
+                            // immediately followed by StateChanged(false), which
+                            // used to clobber it.
+                            if let Some(line) = snapshot_status_line(
+                                reconnecting.load(Ordering::SeqCst),
+                                snapshot.connected,
+                            ) {
+                                state.set_status_line(line.into());
+                            }
                         }
                         AppEvent::HostMedia(media) => {
                             state.set_media_player(media.player.into());
@@ -563,21 +773,56 @@ fn main() {
                             state.set_system_eq_text(system_eq_text(&status).into());
                         }
                         AppEvent::Error(message) => {
-                            state.set_status_line(message.clone().into());
+                            if let Some(kind) = toggle_for_message(&message) {
+                                // Roll back the optimistic toggle whose write
+                                // failed (#71).
+                                if let Some((pending_kind, prev)) = pending_toggle
+                                    .lock()
+                                    .expect("pending toggle mutex")
+                                    .take()
+                                    .filter(|(k, _)| *k == kind)
+                                {
+                                    rollback_toggle(&state, pending_kind, prev);
+                                }
+                            } else if is_terminal_error(&message) {
+                                reconnecting.store(false, Ordering::SeqCst);
+                                state.set_status_line(message.clone().into());
+                            }
+                            // Non-terminal re-bootstrap errors keep the
+                            // reconnecting status line but are always logged.
                             let log = state.get_event_log();
                             state.set_event_log(
                                 append_log(&log, &format!("ERROR: {message}")).into(),
                             );
                         }
                         AppEvent::Denied(message) => {
-                            state.set_status_line(format!("Denied: {message}").into());
+                            if let Some(kind) = toggle_for_message(&message) {
+                                // A denied write rolls the toggle back too (#71).
+                                if let Some((pending_kind, prev)) = pending_toggle
+                                    .lock()
+                                    .expect("pending toggle mutex")
+                                    .take()
+                                    .filter(|(k, _)| *k == kind)
+                                {
+                                    rollback_toggle(&state, pending_kind, prev);
+                                }
+                            } else if !reconnecting.load(Ordering::SeqCst) {
+                                state.set_status_line(format!("Denied: {message}").into());
+                            }
                             let log = state.get_event_log();
                             state.set_event_log(
                                 append_log(&log, &format!("DENIED: {message}")).into(),
                             );
                         }
                         AppEvent::Info(message) => {
-                            state.set_status_line(message.clone().into());
+                            if toggle_for_message(&message).is_some() {
+                                // The write succeeded: confirm the optimistic
+                                // toggle (#71).
+                                *pending_toggle.lock().expect("pending toggle mutex") = None;
+                            }
+                            if !reconnecting.load(Ordering::SeqCst) {
+                                state.set_status_line(message.clone().into());
+                            }
                             let log = state.get_event_log();
                             state.set_event_log(append_log(&log, &message).into());
                         }
@@ -592,7 +837,14 @@ fn main() {
                                 let mut storage = XdgStorage::default_path()
                                     .map(XdgStorage::new)
                                     .expect("XDG config path resolvable");
-                                config::save_persisted_config(&mut storage, &cfg);
+                                if let Err(e) = config::save_persisted_config(&mut storage, &cfg) {
+                                    // #71: a failed attestation save must be
+                                    // visible, not silently lost.
+                                    eprintln!("521c: config save failed: {e}");
+                                    state.set_status_line(
+                                        format!("Warning: could not save config: {e}").into(),
+                                    );
+                                }
                             }
                             state.set_status_line(
                                 format!("Model confirmed for {address}; controls enabled.").into(),
@@ -604,6 +856,7 @@ fn main() {
                         }
                         AppEvent::SessionLost { address } => {
                             connected_flag.store(false, Ordering::SeqCst);
+                            reconnecting.store(true, Ordering::SeqCst);
                             state.set_status_line(
                                 format!("Link to {address} lost; reconnecting in background…")
                                     .into(),
@@ -615,6 +868,7 @@ fn main() {
                         }
                         AppEvent::SessionRestored { address } => {
                             connected_flag.store(true, Ordering::SeqCst);
+                            reconnecting.store(false, Ordering::SeqCst);
                             state.set_status_line(
                                 format!("Session with {address} restored.").into(),
                             );
@@ -642,7 +896,7 @@ fn main() {
         std::thread::sleep(Duration::from_millis(500));
         println!(
             "521c: self-test OK (transport={}, window created, event pump alive)",
-            if mock { "mock" } else { "bluez" }
+            backend.label()
         );
         return;
     }
@@ -655,7 +909,9 @@ fn main() {
             let mut storage = XdgStorage::default_path()
                 .map(XdgStorage::new)
                 .expect("XDG config path resolvable");
-            config::save_persisted_config(&mut storage, &cfg);
+            if let Err(e) = config::save_persisted_config(&mut storage, &cfg) {
+                eprintln!("521c: config save failed on exit: {e}");
+            }
         }
         // v1 is a normal windowed app with no tray/background mode (see
         // DESKTOP_ARCHITECTURE.md §6): a normal close must end the event loop
@@ -707,5 +963,129 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Tests for the pure desktop decision helpers                         */
+/* ------------------------------------------------------------------ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /* #64d: auto-game reconcile is edge-triggered */
+
+    #[test]
+    fn game_mode_reconcile_fires_only_on_the_connect_edge() {
+        // disconnected -> connected: reconcile.
+        assert!(should_reconcile_game_mode(false, true, true, true));
+        // connected -> connected (keepalive/noise snapshots): never.
+        assert!(!should_reconcile_game_mode(true, true, true, true));
+        // disconnected -> disconnected: never.
+        assert!(!should_reconcile_game_mode(false, false, true, true));
+        // connected -> disconnected: never (desired-off never forces).
+        assert!(!should_reconcile_game_mode(true, false, true, true));
+        // Feature disabled or desired-off: never.
+        assert!(!should_reconcile_game_mode(false, true, false, true));
+        assert!(!should_reconcile_game_mode(false, true, true, false));
+    }
+
+    #[test]
+    fn game_mode_write_count_is_pinned_across_keepalive_snapshots() {
+        // Simulate the resident-session event stream: one connect followed by
+        // many connected snapshots (30 s keepalive refreshes). Exactly one
+        // reconcile write may happen — the old behavior wrote on every
+        // snapshot.
+        let snapshots = [true, true, true, true, true, true, true, true];
+        let mut prev_connected = false;
+        let mut writes = 0;
+        for connected in snapshots {
+            if should_reconcile_game_mode(prev_connected, connected, true, true) {
+                writes += 1;
+            }
+            prev_connected = connected;
+        }
+        assert_eq!(
+            writes, 1,
+            "one write on the connect edge, none per keepalive"
+        );
+    }
+
+    /* #64c: reconnecting status line survives snapshots */
+
+    #[test]
+    fn snapshot_status_line_is_suppressed_while_reconnecting() {
+        assert_eq!(snapshot_status_line(false, true), Some("Connected."));
+        assert_eq!(snapshot_status_line(false, false), Some("Disconnected."));
+        // While the supervisor re-bootstraps, StateChanged must not clobber
+        // the recovery line — neither the connected=false snapshot right
+        // after SessionLost nor a later restored snapshot.
+        assert_eq!(snapshot_status_line(true, false), None);
+        assert_eq!(snapshot_status_line(true, true), None);
+    }
+
+    #[test]
+    fn rebootstrap_errors_are_not_terminal() {
+        assert!(!is_terminal_error(
+            "re-bootstrap: connect failed: out of range"
+        ));
+        assert!(is_terminal_error("battery read failed: disconnected"));
+        assert!(is_terminal_error("link state check failed: bus error"));
+    }
+
+    /* #71: toggle rollback message routing */
+
+    #[test]
+    fn toggle_messages_are_routed_by_feature_prefix() {
+        assert_eq!(
+            toggle_for_message("game mode: disconnected"),
+            Some(ToggleKind::GameMode)
+        );
+        assert_eq!(
+            toggle_for_message("sleep mode: device is read-only"),
+            Some(ToggleKind::SleepMode)
+        );
+        assert_eq!(
+            toggle_for_message("in-ear detection: timeout"),
+            Some(ToggleKind::InEarDetection)
+        );
+        // Success Infos carry the same prefix.
+        assert_eq!(
+            toggle_for_message("game mode on"),
+            Some(ToggleKind::GameMode)
+        );
+        // Unrelated events route nowhere.
+        assert_eq!(toggle_for_message("noise mode set to Anc"), None);
+        assert_eq!(toggle_for_message("battery read failed"), None);
+    }
+
+    /* #66: the UI must say which transport is actually running */
+
+    #[test]
+    fn transport_backend_badge_and_status_are_honest() {
+        let bluez = TransportBackend::BlueZ;
+        assert_eq!(bluez.badge(), "BlueZ transport");
+        assert_eq!(bluez.label(), "bluez");
+        assert!(!bluez.is_mock());
+        assert!(bluez.status_line().starts_with("BlueZ transport"));
+
+        let explicit = TransportBackend::MockExplicit;
+        assert_eq!(explicit.badge(), "MOCK transport (development)");
+        assert_eq!(explicit.label(), "mock");
+        assert!(explicit.is_mock());
+
+        // The fallback must be distinguishable from both: mock semantics,
+        // but a badge/status that says WHY and never claims BlueZ.
+        let fallback = TransportBackend::MockFallback {
+            reason: "no system bus".into(),
+        };
+        assert_eq!(fallback.badge(), "MOCK transport (BlueZ unavailable)");
+        assert_eq!(fallback.label(), "mock");
+        assert!(fallback.is_mock());
+        let status = fallback.status_line();
+        assert!(status.contains("BlueZ unavailable"), "{status}");
+        assert!(status.contains("no system bus"), "{status}");
+        assert!(status.contains("simulated"), "{status}");
     }
 }
