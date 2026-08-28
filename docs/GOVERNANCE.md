@@ -118,8 +118,8 @@ delivery session and when a milestone completes.
 
 ## 6. Coding agents and repository policy
 
-Autonomous agents (Prime Agent and others) operate under `AGENTS.md`,
-`PRIME_AGENT_START.md` and `.prime/agent/APPEND_SYSTEM.md`. In short:
+Jcode and any delegated autonomous agents operate under `AGENTS.md`,
+`JCODE_AGENT_START.md` and `.jcode/prompt-overlay.md`. In short:
 
 - agents may make ordinary engineering decisions delegated by those contracts;
 - agents must not invent protocol facts, weaken tests/safety/truth labels, or

@@ -53,4 +53,4 @@ After reproducible dependency locking lands, use `npm ci` for clean validation e
 
 Agents may make ordinary engineering decisions without user hand-holding when the repository contracts provide enough direction. They must still respect `docs/HOST_SAFETY.md`, use evidence rather than guesses for proprietary protocol work, and close issues only when acceptance criteria are actually proven. Agent work is reviewed under the same standards as human work; see `docs/GOVERNANCE.md` §6.
 
-See `PRIME_AGENT_START.md` for the canonical autonomous delivery bootstrap.
+See `JCODE_AGENT_START.md` for the canonical Jcode autonomous delivery bootstrap.

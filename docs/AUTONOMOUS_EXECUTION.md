@@ -1,6 +1,6 @@
 # Autonomous execution plan
 
-**Authority:** normative execution plan for Prime Agent and other long-running coding agents.
+**Authority:** normative execution plan for Jcode, the primary autonomous implementation agent, and any delegated coding agents.
 
 This document converts the repository backlog into a bounded delivery program. The goal is not to process issue numbers mechanically; it is to reach a safe, tested Linux desktop release while respecting the dependency graph and preserving protocol evidence.
 

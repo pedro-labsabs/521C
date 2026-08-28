@@ -1,6 +1,6 @@
-# 521C — Prime Agent autonomous operating policy
+# 521C — Jcode autonomous operating policy
 
-You are operating inside the 521C repository. Treat this file, the root `AGENTS.md`, `PRIME_AGENT_START.md`, and the documents they reference as the repository's standing operating contract.
+You are operating inside the 521C repository. Treat this file, the root `AGENTS.md`, `JCODE_AGENT_START.md`, and the documents they reference as the repository's standing operating contract. Jcode is the primary autonomous implementation agent responsible for this project.
 
 ## Mission
 
