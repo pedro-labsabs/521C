@@ -94,12 +94,18 @@ is ever added, these same types become the IPC schema unchanged.
   `Device1.Connect()` is never issued for a device already marked
   `Connected`, and BlueZ `br-connection-busy` / `AlreadyConnected` answers are
   treated as "link already up" and proceed to characteristic resolution.
-- Live-observed firmware behavior (HT08, 2026-08-26): while the earbuds are
-  streaming BR/EDR audio they do not advertise their BLE identity at all, so
-  GATT attach is impossible during an active audio session. The recommended
-  workflow is to attach GATT first (earbuds out of the case, audio not yet
-  connected) and connect audio afterwards; the app reports the asleep-BLE
-  state with actionable guidance instead of failing opaquely.
+- Live-validated reachability model (HT08, #52, 2026-08-27): the LE control
+  identity keeps advertising connectable `ADV_IND` during normal use, and LE
+  control coexists with BR/EDR audio once the session is up. Intermittent
+  connection failures were host-side: an active HFP/SCO (hands-free) session
+  makes this controller abort LE connection initiation before any HCI
+  command (`le-connection-abort-by-local`). The transport preflights
+  `MediaTransport1` for active HFP/HSP UUIDs and fails with an actionable
+  diagnostic (release the microphone / switch the card to A2DP); a resident
+  session supervisor holds the LE link and re-bootstraps on link loss
+  (#54/#57). Fully idle LE links are dropped by the earbuds firmware, so the
+  supervisor keeps the session busy (settings-notify subscription plus
+  periodic battery/firmware reads, #58).
 - `--mock`: deterministic mock transport, visibly labelled in the UI
   ("MOCK transport (development)" badge). Mock mode never pretends to be
   hardware.
