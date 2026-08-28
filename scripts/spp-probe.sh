@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Hardware probe for issue #50: exercise the HT08 SPP control channel.
-# Run with the earbuds OUT of the case (ideally connected for A2DP so they stay awake).
-# Stage-2-safe by default: read-only probes. Pass WRITE=1 to also send the
-# allowlisted, reversible ANC toggle (0x0C) and confirm the effect by ear.
+# Generic SPP/RFCOMM probe (issue #50 history, retargeted after #52).
+#
+# NOT an HT08 control probe: live validation (#52) proved the HT08 control
+# path is BLE GATT on the separate LE identity, and HT08 SPP channel 1
+# ("COM5") only byte-ACKs frames without executing them. Use this script to
+# characterize SPP behavior of OTHER QCY models whose evidence may point at
+# RFCOMM, or to re-confirm the HT08 byte-ACK behavior.
+#
+# Read-only by default. WRITE=1 sends one validated 0x17 ANC scene frame
+# (indoor scene) — only meaningful on a model whose evidence shows SPP
+# command execution; on HT08 it demonstrates the byte-ACK-only behavior.
 set -u
 ADDR="${1:-84:AC:60:62:69:DA}"
 WRITE="${WRITE:-0}"
@@ -47,12 +54,11 @@ rfcomm_session("version", [("req", bytes.fromhex("ff03fe0130"))], wait=6)
 rfcomm_session("rcsp-info", [("req", bytes.fromhex("fedcba01c0000101ef"))], wait=4)
 
 if WRITE:
-    # 4. allowlisted reversible write: ANC on (0x0C 0x01), then off (0x0C 0x00)
-    rfcomm_session("anc-on", [("req", bytes.fromhex("ff030c0101"))], wait=3)
-    print(">>> confirm ANC engaged by ear, then off in 5 s")
-    time.sleep(5)
-    rfcomm_session("anc-off", [("req", bytes.fromhex("ff030c0100"))], wait=3)
-    print(">>> confirm ANC off")
+    # 4. validated 0x17 ANC scene write (indoor (1,1,2)). 0x0C is falsified
+    # on HT08 and never probed. On HT08 expect only the byte-ACK bridge
+    # response and NO audible effect — that is the documented result.
+    rfcomm_session("anc-scene-indoor", [("req", bytes.fromhex("ff051703010102"))], wait=3)
+    print(">>> on a model with evidenced SPP execution, confirm ANC indoor by ear")
 else:
-    print("WRITE=0: skipping ANC write probe (set WRITE=1 to include it)")
+    print("WRITE=0: skipping write probe (set WRITE=1 to include it)")
 PYEOF

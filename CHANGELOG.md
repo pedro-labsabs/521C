@@ -8,6 +8,26 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Added
 
+- Live HT08 transport resolution (#50/#52): the control path is BLE GATT on
+  the earbuds' separate LE identity (`0000a001` vendor service), validated
+  on real hardware — battery/firmware reads, ANC writes with firmware ACKs,
+  and LE/BR-EDR coexistence. SPP/RFCOMM remains as a generic backend only;
+  the HT08 SPP channel byte-ACKs without executing commands.
+- Resident BLE session supervisor (#54/#57): the app holds the LE control
+  session, detects link loss (`SessionLost`/`SessionRestored`), re-bootstraps
+  with a cooldown, and preflights active HFP/SCO sessions that block LE
+  connection initiation host-side (`le-connection-abort-by-local`). Session
+  keepalive: settings-notify subscription plus periodic battery/firmware
+  reads prevent the firmware idle-drop (#58).
+- Native desktop noise control now covers all seven hardware-validated ANC
+  scenes (off, ANC, adaptive, commuting, noisy, wind, transparency) via
+  opcode 0x17 (#56/#58).
+- `521cctl --spp` SPP/RFCOMM transport backend with the same write policy
+  and conformance-pinned read mappings (#51).
+- `QCY_CORE_TRACE=1` lifecycle tracing for resident-session diagnosis (#58).
+- Conformance corpus `writePolicy` section pinning the HT08 authorization
+  surface (supported/experimental/destructive opcodes, direct-write
+  characteristics) for both policy implementations (#59).
 - Auto-attach for already-connected earbuds: at startup (BlueZ mode) the app
   detects devices the host is already connected to (e.g. earbuds connected for
   audio before the app started) and attaches the first candidate
@@ -27,6 +47,16 @@ defined in `docs/GOVERNANCE.md` §4.
 
 ### Changed
 
+- ANC control model replaced (#53/#55/#56): live HT08 validation falsified
+  `0x0C NoiseCancelMode` (writes ignored, no ACK) — demoted to
+  experimental/opt-in in the evidence ledger. All ANC UI flows (web surface
+  and native core) now emit the hardware-validated `0x17 AncSetting` scene
+  table; adjustable ANC/transparency levels are marked unvalidated
+  (read-only) instead of being simulated.
+- Docs synchronized with the validated transport model (#61):
+  SUPPORTED_DEVICES capability rows, SECURITY_MODEL policy description,
+  DESKTOP_ARCHITECTURE reachability model and the PROTOCOL opcode table no
+  longer assert the pre-validation 0x0C/SPP premise.
 - System EQ now renders a complete, valid PipeWire filter-chain artifact (issue #13
   audit revalidation): a 10-band biquad graph (low shelf 31 Hz, peaking bands
   62 Hz–8 kHz, high shelf 16 kHz, Q = 1.0, gains ±12 dB) in the exact syntax of the
@@ -40,6 +70,14 @@ defined in `docs/GOVERNANCE.md` §4.
   graph (band labels, frequencies, gains, link chain, effect-sink props).
 
 ### Fixed
+
+- Desktop noise buttons had no effect on real hardware: the native core
+  still encoded the falsified 0x0C opcode; it now emits the validated 0x17
+  scenes, and the Off button is no longer permanently disabled by stale UI
+  state (#58).
+- Resident-session connect/disconnect loop: the app held a fully idle LE
+  link that the earbuds firmware dropped; keepalive (notify subscription +
+  periodic reads) keeps the session alive (#58).
 
 - BlueZ connect no longer fails with `org.bluez.Error.Failed:
   br-connection-busy` when the earbuds are already connected at the host
