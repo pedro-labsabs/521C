@@ -48,8 +48,17 @@ free of generator logic.
   "battery": [       // BatteryState::decode / parseBatteryBytes
     { "name": "...", "hex": "52505e", "expect": { "left": {...}, "right": {...}, "case": {...} } }
   ],
-  "firmware": {      // TypeScript-only; Rust core has no firmware parser
-    "consumers": ["typescript"], "vectors": [ ... ]
+  "firmware": {      // TS parses into state; Rust formats x.y.z for display
+    "consumers": ["typescript", "rust-display"], "vectors": [ ... ]
+  },
+  "spp": {           // Rust-only: qcy-transport SPP/RFCOMM backend
+    "consumers": ["rust"], "defaultChannel": 1,
+    "reads": [ { "name": "...", "charUuid": "...", "requestHex": "...",
+                 "responseHex": "...", "expectHex": "..." } ]
+  },
+  "writePolicy": {   // pinned by BOTH policy test suites
+    "ht08": { "supported": ["05", "..."], "experimental": ["0c", "..."],
+              "destructive": ["01", "02", "03"], "directChars": ["..."] }
   }
 }
 ```
@@ -70,8 +79,21 @@ Decode error names are canonical kebab-case and mapped to each language's enum:
 
 Consumers compare only the overlapping semantic fields. For example the Rust
 `Advertisement` has no `colorIndex`/`rawLength`, so advertisement vectors assert
-`vendorId`, `battery`, `controlMac`, and `otherMac` only. The `firmware` section
-is consumed by TypeScript alone.
+`vendorId`, `battery`, `controlMac`, and `otherMac` only.
+
+Section consumers:
+
+- `spp` — Rust only (`native/crates/qcy-transport/tests/conformance_spp.rs`).
+  The `charUuid` values are virtual read-keys: SPP has no GATT
+  characteristics, so the transport maps each key to a `RequestData(0xFE)`
+  exchange over the stream.
+- `writePolicy` — both languages: the Rust `WritePolicy`
+  (`native/crates/qcy-transport/tests/conformance_write_policy.rs`) and the
+  TS policy suite pin the HT08 supported/experimental/destructive opcode
+  sets and the direct-write characteristic allowlist against this section,
+  which mirrors the canonical evidence ledger
+  (`src/lib/qcy/protocol/evidence.ts`). Added after audit #59 found the Rust
+  allowlist had drifted from the ledger's #53 demotion of 0x0C.
 
 ## Adding a vector
 
