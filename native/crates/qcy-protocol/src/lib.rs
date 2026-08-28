@@ -108,24 +108,42 @@ mod evidence_consistency {
     /// The destructive set must stay exactly the documented 0x01/0x02/0x03, matching
     /// the TypeScript evidence ledger and `DESTRUCTIVE_CMDS`. This is the native-side
     /// half of the "destructive never automated" invariant.
+    ///
+    /// The list below is deliberately EXHAUSTIVE over every `Cmd` variant
+    /// (audit #71): adding a new opcode forces a compile error here until the
+    /// author decides its destructive status, instead of silently escaping
+    /// the check through a partial sample.
     #[test]
     fn destructive_set_is_exactly_documented() {
-        let destructive: Vec<u8> = [
+        let all_cmds: [Cmd; 21] = [
             Cmd::ResetDefault,
             Cmd::ClearPairing,
             Cmd::FactoryReset,
             Cmd::MusicControl,
             Cmd::LightFlash,
+            Cmd::InEarDetection,
+            Cmd::Volume,
             Cmd::LowLatency,
             Cmd::NoiseCancelMode,
+            Cmd::SleepMode,
+            Cmd::AncSetting,
             Cmd::EqParamsV2,
+            Cmd::Ldac,
+            Cmd::KeyFunction,
+            Cmd::WearingDetection,
+            Cmd::SpatialAudio,
             Cmd::Battery,
+            Cmd::Version,
+            Cmd::EnvAdaptation,
+            Cmd::TonePlay,
             Cmd::RequestData,
-        ]
-        .iter()
-        .filter(|c| c.is_destructive())
-        .map(|c| *c as u8)
-        .collect();
+        ];
+        let mut destructive: Vec<u8> = all_cmds
+            .iter()
+            .filter(|c| c.is_destructive())
+            .map(|c| *c as u8)
+            .collect();
+        destructive.sort_unstable();
         assert_eq!(destructive, vec![0x01, 0x02, 0x03]);
     }
 
