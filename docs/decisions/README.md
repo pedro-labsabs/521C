@@ -16,5 +16,5 @@ needs more space; record it here with a pointer.
 | 0001 | Desktop shell: single native process, Slint UI over the qcy-app core, no IPC in v1; deliberate no-tray alternative | `docs/DESKTOP_ARCHITECTURE.md` |
 
 Reopening a recorded decision requires strong technical evidence that the
-chosen path is infeasible (see `.prime/agent/APPEND_SYSTEM.md` /
-`PRIME_AGENT_START.md` standing constraints), and produces a superseding ADR.
+chosen path is infeasible (see `.jcode/prompt-overlay.md` /
+`JCODE_AGENT_START.md` standing constraints), and produces a superseding ADR.

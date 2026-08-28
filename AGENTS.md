@@ -2,11 +2,11 @@
 
 This file is the operating contract for coding agents working in this repository. Read it before editing code, documentation, issues, or pull requests.
 
-## 0. Autonomous Prime Agent entrypoint
+## 0. Autonomous Jcode entrypoint
 
-For a long-running autonomous delivery session, the canonical entrypoint is `PRIME_AGENT_START.md`.
+For a long-running autonomous delivery session, the canonical entrypoint is `JCODE_AGENT_START.md`.
 
-Prime Agent also receives repository-specific standing policy from `.prime/agent/APPEND_SYSTEM.md`. All agents, regardless of harness, must additionally read:
+Jcode receives repository-specific standing policy from `.jcode/prompt-overlay.md`. All agents, regardless of harness, must additionally read:
 
 - `docs/PRODUCT_SPEC.md` — what the finished product is;
 - `docs/AUTONOMOUS_EXECUTION.md` — dependency graph, operating loop and release criteria;
@@ -36,8 +36,8 @@ Marketing or behavior in the official mobile app does not prove that a Linux-acc
 
 ## 3. Repository map
 
-- `PRIME_AGENT_START.md` — bootstrap instruction for autonomous delivery.
-- `.prime/agent/APPEND_SYSTEM.md` — Prime Agent standing operating policy.
+- `JCODE_AGENT_START.md` — bootstrap instruction for autonomous delivery.
+- `.jcode/prompt-overlay.md` — Jcode standing operating policy loaded by the project configuration.
 - `docs/PRODUCT_SPEC.md` — product target and scope.
 - `docs/AUTONOMOUS_EXECUTION.md` — issue dependency graph and release checklist.
 - `docs/HOST_SAFETY.md` — developer-machine permission boundary.

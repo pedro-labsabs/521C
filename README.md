@@ -8,10 +8,10 @@ The first device profile is **QCY MeloBuds Pro (HT08)**. The project combines a 
 
 ## Autonomous development entrypoint
 
-This repository is prepared for long-running autonomous coding agents, including Prime Agent.
+This repository is configured for Jcode as its primary long-running autonomous coding agent.
 
-- `PRIME_AGENT_START.md` — canonical initial instruction for taking the project through the backlog to release readiness.
-- `.prime/agent/APPEND_SYSTEM.md` — Prime Agent-specific standing operating policy loaded by the harness.
+- `JCODE_AGENT_START.md` — canonical initial instruction for taking the project through the backlog to release readiness.
+- `.jcode/prompt-overlay.md` — Jcode project overlay loaded automatically in new Jcode sessions.
 - `AGENTS.md` — repository-wide engineering contract.
 - `docs/PRODUCT_SPEC.md` — finished-product intent and scope.
 - `docs/AUTONOMOUS_EXECUTION.md` — dependency-aware delivery graph, per-issue loop and final release checklist.
@@ -57,8 +57,8 @@ capabilities and never generate earbud writes.
 
 ```text
 .
-├── .prime/agent/APPEND_SYSTEM.md # Prime Agent standing policy
-├── PRIME_AGENT_START.md          # autonomous delivery bootstrap
+├── .jcode/prompt-overlay.md      # Jcode project operating policy
+├── JCODE_AGENT_START.md          # autonomous delivery bootstrap
 ├── AGENTS.md                     # operating contract for coding agents
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md
