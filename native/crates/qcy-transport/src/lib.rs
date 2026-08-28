@@ -100,6 +100,15 @@ pub trait Transport {
     fn is_connected(&mut self) -> Result<bool, TransportError> {
         Ok(false)
     }
+    /// Address of the device identity that actually holds the live session,
+    /// when the transport knows it. Dual-mode transports may reach a session
+    /// through a fallback identity whose address differs from the one the
+    /// caller requested; attestation and known-device persistence must be
+    /// correlated with THIS address, not the requested one (audit #67).
+    /// Default: unknown.
+    fn session_address(&mut self) -> Option<String> {
+        None
+    }
     /// Read an allowlisted characteristic.
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError>;
     /// Framed write to the command characteristic. Policy-checked.
