@@ -215,3 +215,68 @@ describe("mock transport ignores falsified 0x0C (#71)", () => {
     await expect(t.write(set.noiseMode(0x01))).rejects.toThrow();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* applyProfile surfaces EQ partial failures (#71)                     */
+/* ------------------------------------------------------------------ */
+
+describe("applyProfile EQ partial failure (#71)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  function fixture(id: string, eqId: string): SmartProfile {
+    return {
+      id,
+      name: id,
+      description: "eq failure fixture",
+      builtin: false,
+      noise: "off",
+      ancLevel: 1,
+      transparencyLevel: 1,
+      gameMode: false,
+      eqId,
+      wearDetection: true,
+    };
+  }
+
+  it("reports a failed EQ write and does not mark the profile applied", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-write-fail", "flat"));
+    const activeBefore = useHub.getState().activeProfileId;
+    const t = transportForTests() as MockTransport;
+    t.failOpcode = Cmd.EqParamsV2;
+    try {
+      const result = await useHub.getState().applyProfile("eq-write-fail");
+      expect(result).not.toBeNull();
+      expect(result!.ok).toBe(false);
+      expect(result!.steps.find((s) => s.step === "eq")?.ok).toBe(false);
+      // Failure is surfaced and the profile is NOT marked active.
+      expect(useHub.getState().activeProfileId).toBe(activeBefore);
+      expect(useHub.getState().toast?.title).toBe("Profile partially applied");
+      expect(useHub.getState().toast?.body).toContain("eq");
+    } finally {
+      t.failOpcode = null;
+    }
+  });
+
+  it("reports an unresolvable eqId as a failed step instead of skipping it", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-missing", "no-such-eq"));
+    const activeBefore = useHub.getState().activeProfileId;
+    const result = await useHub.getState().applyProfile("eq-missing");
+    expect(result).not.toBeNull();
+    expect(result!.ok).toBe(false);
+    expect(result!.steps.find((s) => s.step === "eq")?.ok).toBe(false);
+    expect(useHub.getState().activeProfileId).toBe(activeBefore);
+    expect(useHub.getState().toast?.title).toBe("Profile partially applied");
+  });
+
+  it("still marks the profile applied when every step succeeds", async () => {
+    useHub.getState().saveCustomProfile(fixture("eq-ok", "flat"));
+    const result = await useHub.getState().applyProfile("eq-ok");
+    expect(result).not.toBeNull();
+    expect(result!.ok).toBe(true);
+    expect(useHub.getState().activeProfileId).toBe("eq-ok");
+  });
+});

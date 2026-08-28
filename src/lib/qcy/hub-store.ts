@@ -634,18 +634,32 @@ export const useHub = create<HubState & HubActions>((setState, get) => {
     if (eq) {
       const eqOk = await get().setEq(eq);
       steps.push({ step: "eq", ok: eqOk });
+    } else {
+      // An unresolvable EQ reference is a partial failure, not a silent skip
+      // (#71): the profile asked for an EQ that does not exist.
+      steps.push({ step: "eq", ok: false });
     }
     const ok = steps.every((s) => s.ok);
-    setState({ activeProfileId: id });
-    persistFrom(get);
-    if (get().notify.profileSwitch) {
-      const failed = steps.filter((s) => !s.ok).map((s) => s.step);
+    if (ok) {
+      // Only a fully applied profile becomes the active one. A partial
+      // failure must not be presented or persisted as applied (#71).
+      setState({ activeProfileId: id });
+      persistFrom(get);
+    }
+    const failed = steps.filter((s) => !s.ok).map((s) => s.step);
+    if (!ok) {
+      // Failure feedback is not preference-gated: a partial apply is always
+      // surfaced, whatever the notification settings say (#71).
       setState({
         toast: {
           id: toastSeq++,
-          title: ok ? "Profile" : "Profile partially applied",
-          body: ok ? `${profile.name} applied` : `${profile.name}: ${failed.join(", ")} not applied`,
+          title: "Profile partially applied",
+          body: `${profile.name}: ${failed.join(", ")} not applied`,
         },
+      });
+    } else if (get().notify.profileSwitch) {
+      setState({
+        toast: { id: toastSeq++, title: "Profile", body: `${profile.name} applied` },
       });
     }
     // Reconcile against the final observed device state.
