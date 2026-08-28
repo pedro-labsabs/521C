@@ -4,7 +4,9 @@
 //! design is deliberately event-driven: a [`GameModeSignal`] source pushes
 //! [`GameModeEvent`]s, and the pure [`GameModeController`] applies a keyword allowlist
 //! and a cooldown so rapid toggling cannot occur. There is no busy polling loop anywhere
-//! in this module — the controller only acts when an event arrives.
+//! in this module — the controller acts when an event arrives, or when a
+//! cooldown-suppressed transition becomes due and the caller re-evaluates it
+//! ([`GameModeController::reevaluate`], #65).
 //!
 //! The concrete signal source (which application/player/process is active) is
 //! compositor/platform dependent. This module ships the portable, testable core plus a
@@ -72,6 +74,12 @@ pub struct GameModeController {
     last_transition_ms: Option<u64>,
     /// The currently believed game-mode state.
     on: bool,
+    /// A transition suppressed by the cooldown, remembered so it can be applied
+    /// once the cooldown expires (#65). `Some(desired)` until the transition is
+    /// applied or the desired state converges with `on` on its own. Without this
+    /// the controller never retries (it only runs on new events) and a game that
+    /// exits within the cooldown leaves game mode stuck on forever.
+    pending_desired: Option<bool>,
     /// Every candidate currently active. Tracked as a set so that with several
     /// concurrent players (e.g. two MPRIS players) deactivating one never clears
     /// another that is still active (issue #13 audit revalidation).
@@ -85,6 +93,7 @@ impl GameModeController {
             cooldown_ms: cooldown.as_millis() as u64,
             last_transition_ms: None,
             on: false,
+            pending_desired: None,
             active: std::collections::BTreeSet::new(),
         }
     }
@@ -96,6 +105,67 @@ impl GameModeController {
 
     pub fn is_on(&self) -> bool {
         self.on
+    }
+
+    /// The desired game-mode state given the currently active candidates,
+    /// independent of cooldowns and of the state actually applied. Callers that
+    /// reconcile on reconnect should use this (not [`is_on`](Self::is_on)), so a
+    /// cooldown-suppressed off-transition is not re-sent as "on" later (#65).
+    pub fn desired(&self) -> bool {
+        self.active.iter().any(|name| self.rule.matches(name))
+    }
+
+    /// A desired transition currently held back by the cooldown, if any.
+    pub fn pending_desired(&self) -> Option<bool> {
+        self.pending_desired
+    }
+
+    /// Monotonic-ms deadline (in the injected clock domain) at which the
+    /// pending cooldown-suppressed transition becomes due for
+    /// [`reevaluate`](Self::reevaluate). `None` when nothing is pending. Lets a
+    /// caller wait with a timeout instead of polling (#65).
+    pub fn pending_retry_at_ms(&self) -> Option<u64> {
+        self.pending_desired?;
+        // Suppression only happens after at least one transition, so this is set.
+        Some(self.last_transition_ms? + self.cooldown_ms)
+    }
+
+    /// Re-evaluate the pending transition once the cooldown may have expired
+    /// (#65). Applies the remembered desired state when the cooldown allows it;
+    /// until then nothing changes. Also the no-op path when no transition is
+    /// pending or the desired state converged with the applied one.
+    pub fn reevaluate(&mut self, now_ms: u64) -> GameModeDecision {
+        let desired = self.desired();
+        if desired == self.on {
+            // Converged (e.g. a new event already matched the applied state):
+            // nothing is pending anymore.
+            self.pending_desired = None;
+            return GameModeDecision {
+                game_mode_on: self.on,
+                changed: false,
+                suppressed: false,
+            };
+        }
+        let allowed = match self.last_transition_ms {
+            Some(last) => now_ms.saturating_sub(last) >= self.cooldown_ms,
+            None => true,
+        };
+        if !allowed {
+            self.pending_desired = Some(desired);
+            return GameModeDecision {
+                game_mode_on: self.on,
+                changed: false,
+                suppressed: true,
+            };
+        }
+        self.on = desired;
+        self.pending_desired = None;
+        self.last_transition_ms = Some(now_ms);
+        GameModeDecision {
+            game_mode_on: self.on,
+            changed: true,
+            suppressed: false,
+        }
     }
 
     /// Process one event at time `now_ms`. Returns the decision; the caller is
@@ -111,33 +181,7 @@ impl GameModeController {
                 self.active.remove(&name);
             }
         }
-        let desired = self.active.iter().any(|name| self.rule.matches(name));
-        if desired == self.on {
-            return GameModeDecision {
-                game_mode_on: self.on,
-                changed: false,
-                suppressed: false,
-            };
-        }
-        // A transition is wanted; apply the cooldown.
-        let allowed = match self.last_transition_ms {
-            Some(last) => now_ms.saturating_sub(last) >= self.cooldown_ms,
-            None => true,
-        };
-        if !allowed {
-            return GameModeDecision {
-                game_mode_on: self.on,
-                changed: false,
-                suppressed: true,
-            };
-        }
-        self.on = desired;
-        self.last_transition_ms = Some(now_ms);
-        GameModeDecision {
-            game_mode_on: self.on,
-            changed: true,
-            suppressed: false,
-        }
+        self.reevaluate(now_ms)
     }
 }
 
@@ -496,12 +540,83 @@ mod tests {
         assert!(sup.suppressed && !sup.changed);
         assert!(c.is_on());
         assert!(c.active_candidates().is_empty());
+        // The suppressed off-transition is remembered (#65), but a fresh matching
+        // activation converges the desired state with the applied one...
+        assert_eq!(c.pending_desired(), Some(false));
         // After the cooldown, a fresh matching activation is a no-op (already on),
-        // and the next real transition is allowed deterministically.
+        // clears the pending off-transition, and the next real transition is
+        // allowed deterministically.
         let again = c.handle(GameModeEvent::Activated("game b".into()), 1200);
         assert!(!again.changed);
         assert!(c.is_on());
+        assert_eq!(c.pending_desired(), None);
         let off = c.handle(GameModeEvent::Deactivated("game b".into()), 2300);
         assert!(off.changed && !off.game_mode_on);
+    }
+
+    /* Cooldown-suppressed transitions are retried, not dropped (#65) */
+
+    #[test]
+    fn suppressed_off_transition_is_applied_by_reevaluate_after_cooldown() {
+        // Game exits within the cooldown window: the off-transition is
+        // suppressed. With no further MPRIS events ever arriving, the
+        // controller must still turn game mode off once the cooldown expires.
+        let mut c = controller(&["game"], 1000);
+        let on = c.handle(GameModeEvent::Activated("my game".into()), 0);
+        assert!(on.changed && on.game_mode_on);
+        let sup = c.handle(GameModeEvent::Deactivated("my game".into()), 100);
+        assert!(sup.suppressed && !sup.changed);
+        assert!(c.is_on());
+        assert_eq!(c.pending_desired(), Some(false));
+        assert_eq!(c.pending_retry_at_ms(), Some(1000));
+
+        // No new events: reevaluate after the expiry applies the transition.
+        let off = c.reevaluate(1100);
+        assert!(off.changed && !off.game_mode_on);
+        assert!(!c.is_on());
+        assert_eq!(c.pending_desired(), None);
+        assert_eq!(c.pending_retry_at_ms(), None);
+    }
+
+    #[test]
+    fn reevaluate_before_cooldown_expiry_changes_nothing() {
+        let mut c = controller(&["game"], 1000);
+        c.handle(GameModeEvent::Activated("my game".into()), 0);
+        let sup = c.handle(GameModeEvent::Deactivated("my game".into()), 100);
+        assert!(sup.suppressed);
+
+        // Before the cooldown expires, reevaluate keeps the suppressed state.
+        let early = c.reevaluate(999);
+        assert!(!early.changed && early.suppressed);
+        assert!(c.is_on());
+        assert_eq!(c.pending_desired(), Some(false));
+    }
+
+    #[test]
+    fn reevaluate_without_a_pending_transition_is_a_noop() {
+        let mut c = controller(&["game"], 1000);
+        let d = c.reevaluate(5000);
+        assert!(!d.changed && !d.suppressed && !d.game_mode_on);
+        assert_eq!(c.pending_desired(), None);
+        assert_eq!(c.pending_retry_at_ms(), None);
+    }
+
+    #[test]
+    fn suppressed_on_transition_is_applied_by_reevaluate_too() {
+        // Symmetry: a suppressed ON transition (matching player appears inside
+        // the cooldown of a previous transition) is also retried.
+        let mut c = controller(&["game"], 1000);
+        let on = c.handle(GameModeEvent::Activated("game a".into()), 0);
+        assert!(on.changed);
+        // Off after the cooldown...
+        let off = c.handle(GameModeEvent::Deactivated("game a".into()), 1000);
+        assert!(off.changed && !off.game_mode_on);
+        // ...and a new matching player inside the new cooldown window: on suppressed.
+        let sup = c.handle(GameModeEvent::Activated("game b".into()), 1100);
+        assert!(sup.suppressed && !sup.changed);
+        assert_eq!(c.pending_desired(), Some(true));
+        assert_eq!(c.pending_retry_at_ms(), Some(2000));
+        let on2 = c.reevaluate(2100);
+        assert!(on2.changed && on2.game_mode_on);
     }
 }
