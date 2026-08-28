@@ -1,13 +1,13 @@
-//! SPP/RFCOMM transport backend (issue #50).
+//! SPP/RFCOMM transport backend (issue #50, retargeted by #52).
 //!
-//! BlueZ does not expose the QCY vendor GATT service (`0000a001`) for these
-//! dual-mode earbuds on Linux: while the earbuds are connected for A2DP audio
-//! the LE identity is asleep, and the cached device UUIDs show `00001101`
-//! (Serial Port Profile) instead of `0000a001`. Independent reverse-engineering
-//! projects converge on the same control path (see issue #50 for provenance):
-//! **SPP/RFCOMM carrying the same `0xFF`-framed command protocol** this crate
-//! already implements. Only the byte pipe changes; the codecs and the write
-//! policy are reused unchanged.
+//! **Not the HT08 control path.** Live validation (#52) proved the HT08
+//! control surface is BLE GATT: BlueZ resolves the vendor service
+//! (`0000a001`) on the earbuds' separate LE control identity, and HT08 SPP
+//! channel 1 ("COM5") only byte-ACKs frames without executing them (see
+//! `docs/devices/HT08.md`). This backend remains as a **generic** transport
+//! for QCY models whose evidence may point at RFCOMM, carrying the same
+//! `0xFF`-framed command protocol this crate implements — only the byte pipe
+//! changes; the codecs and the write policy are reused unchanged.
 //!
 //! This backend opens a raw `AF_BLUETOOTH` / `BTPROTO_RFCOMM` socket to the
 //! device's BR/EDR address. It never requires root, never shells out, and
@@ -61,6 +61,13 @@ const CHAR_VERSION: &str = "00000007-0000-1000-8000-00805f9b34fb";
 
 /// A valid frame is at most `2 + 255` bytes (one-byte declared body length).
 const MAX_FRAME: usize = 257;
+/// Plausibility bound used for stream resynchronization. Every documented
+/// QCY frame (corpus + live captures) is far smaller than this; a candidate
+/// whose declared length exceeds it is treated as a stray `0xFF` (e.g. a
+/// garbage byte or a truncated frame boundary) and the reader resyncs on the
+/// next SOF instead of stalling while waiting for up to 257 bytes that will
+/// never form a valid frame (audit #68).
+const MAX_REASONABLE_FRAME: usize = 128;
 /// Bound on the reassembly buffer; a garbage stream cannot grow it past this.
 const MAX_BUFFER: usize = 4096;
 /// Bound on queued unsolicited notification frames (oldest dropped).
@@ -118,6 +125,13 @@ impl FrameReader {
             }
             let total = self.buf[1] as usize + 2;
             debug_assert!(total <= MAX_FRAME);
+            if total > MAX_REASONABLE_FRAME {
+                // Implausible declared length: this SOF is stray data. Drop it
+                // and rescan instead of waiting for a huge frame that would
+                // stall the reader and swallow any valid frame behind it.
+                self.buf.drain(..1);
+                continue;
+            }
             if self.buf.len() < total {
                 return None; // incomplete frame: wait for more bytes
             }
@@ -220,6 +234,14 @@ impl RfcommTransport {
     }
 
     fn queue_notify(&mut self, frame: Vec<u8>) {
+        // Mirror GATT semantics: unsolicited frames are only surfaced as
+        // notifications after an explicit [`Transport::subscribe`] on the
+        // settings-notify characteristic. Frames arriving while answering a
+        // read are dropped otherwise (they were not requested and nobody is
+        // listening for them).
+        if !self.subscribed {
+            return;
+        }
         if self.notify_queue.len() >= MAX_NOTIFY_QUEUE {
             self.notify_queue.pop_front();
         }
@@ -376,6 +398,14 @@ impl Transport for RfcommTransport {
         if self.socket.is_some() {
             self.connected_model_known = true;
         }
+    }
+
+    /// The RFCOMM socket is the link: report its live state instead of the
+    /// trait default (`false`), which would make a resident-session
+    /// supervisor believe the link is permanently down and re-bootstrap in a
+    /// loop (audit #68).
+    fn is_connected(&mut self) -> Result<bool, TransportError> {
+        Ok(self.socket.is_some())
     }
 }
 
@@ -715,6 +745,26 @@ mod tests {
     }
 
     #[test]
+    fn frame_reader_resyncs_after_a_stray_sof_with_implausible_length() {
+        // Audit #68: a stray 0xFF followed by another 0xFF declares a 255-byte
+        // body. Without the plausibility bound the reader stalled waiting for
+        // 257 bytes and swallowed the valid frame behind the stray byte.
+        let mut r = FrameReader::new();
+        r.push(&from_hex("ffff052f0352505e"));
+        assert_eq!(r.next_frame(), Some(from_hex("ff052f0352505e")));
+        assert_eq!(r.next_frame(), None);
+    }
+
+    #[test]
+    fn frame_reader_resyncs_when_only_the_stray_sof_has_arrived() {
+        let mut r = FrameReader::new();
+        r.push(&from_hex("ff"));
+        assert_eq!(r.next_frame(), None);
+        r.push(&from_hex("ff052f0352505e"));
+        assert_eq!(r.next_frame(), Some(from_hex("ff052f0352505e")));
+    }
+
+    #[test]
     fn frame_reader_accepts_empty_body_frame() {
         let mut r = FrameReader::new();
         r.push(&from_hex("ff00"));
@@ -833,6 +883,7 @@ mod tests {
     #[test]
     fn unsolicited_frames_are_queued_while_answering_a_read() {
         let (mut t, pipe) = connected();
+        t.subscribe(CHAR_SETTINGS_NOTIFY).unwrap();
         // Device first pushes an unsolicited LowLatency frame, then answers.
         pipe.rx
             .lock()
@@ -842,6 +893,30 @@ mod tests {
         assert_eq!(bytes, vec![0x52, 0x50, 0x5E]);
         assert_eq!(t.pop_notify(), Some(from_hex("ff03090101")));
         assert_eq!(t.pop_notify(), None);
+    }
+
+    #[test]
+    fn unsolicited_frames_are_dropped_without_a_subscription() {
+        // Audit #68: the `subscribed` flag is wired — mirroring GATT, notify
+        // frames are only surfaced after subscribe().
+        let (mut t, pipe) = connected();
+        pipe.rx
+            .lock()
+            .unwrap()
+            .push_back(IoEvent::Data(from_hex("ff03090101ff052f0352505e")));
+        let bytes = t.read(CHAR_BATTERY).unwrap();
+        assert_eq!(bytes, vec![0x52, 0x50, 0x5E]);
+        assert_eq!(t.pop_notify(), None);
+    }
+
+    #[test]
+    fn is_connected_tracks_the_socket_state() {
+        // Audit #68: the trait default (always false) would make a
+        // resident-session supervisor re-bootstrap in a loop.
+        let (mut t, _pipe) = connected();
+        assert_eq!(t.is_connected(), Ok(true));
+        t.disconnect().unwrap();
+        assert_eq!(t.is_connected(), Ok(false));
     }
 
     /* -------------------- writes / policy -------------------- */
