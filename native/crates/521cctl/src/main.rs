@@ -83,16 +83,15 @@ fn parse_opts<I: Iterator<Item = String>>(args: I) -> Result<(Options, Vec<Strin
             "--device" => opts.device = Some(flag_value(&mut args, "--device")?),
             "--channel" => {
                 let raw = flag_value(&mut args, "--channel")?;
-                opts.channel = Some(raw.parse::<u8>().map_err(|_| {
-                    format!("--channel: not a number: `{raw}` (expected 1-30)")
-                })?);
+                opts.channel =
+                    Some(raw.parse::<u8>().map_err(|_| {
+                        format!("--channel: not a number: `{raw}` (expected 1-30)")
+                    })?);
             }
             "--attest" => opts.attest = true,
             "help" | "-h" | "--help" => opts.help = true,
             other if other.starts_with('-') => {
-                return Err(format!(
-                    "unknown flag: `{other}` (see `521cctl help`)"
-                ))
+                return Err(format!("unknown flag: `{other}` (see `521cctl help`)"))
             }
             _ => rest.push(a),
         }
@@ -270,19 +269,19 @@ fn print_help() {
     println!("  battery                  connect + battery readout");
     println!("  anc <{ANC_MODES}>");
     println!("                           validated 0x17 AncSetting scenes");
-    println!("                           (0x0C NoiseCancelMode is falsified on HT08 and never written)");
+    println!(
+        "                           (0x0C NoiseCancelMode is falsified on HT08 and never written)"
+    );
     println!("  game-mode <on|off>       low-latency mode (explicit value required)");
     println!("Host services (never written to the earbuds):");
     println!("  media <status|play|pause|next|prev>   MPRIS media control");
-    println!("  codec                                 host codec/sample-rate (unknown if unavailable)");
+    println!(
+        "  codec                                 host codec/sample-rate (unknown if unavailable)"
+    );
     println!("  system-eq <on|off|status> [gains...]  PipeWire System EQ");
     println!("Mock is the deliberate default; --bluez targets BLE GATT and --spp targets");
-    println!(
-        "SPP/RFCOMM (the control path BlueZ exposes for QCY earbuds on Linux, issue #50)."
-    );
-    println!(
-        "--attest is explicit user attestation that the device model is known (writes)."
-    );
+    println!("SPP/RFCOMM (the control path BlueZ exposes for QCY earbuds on Linux, issue #50).");
+    println!("--attest is explicit user attestation that the device model is known (writes).");
     println!("Independent. Not affiliated with QCY.");
 }
 
@@ -292,7 +291,7 @@ fn run() -> Result<(), TransportError> {
 
 fn run_args<I: IntoIterator<Item = String>>(args: I) -> Result<(), TransportError> {
     let usage = |message: String| TransportError::InvalidArgument(message);
-    let (opts, rest) = parse_opts(args.into_iter().map(String::from)).map_err(usage)?;
+    let (opts, rest) = parse_opts(args.into_iter()).map_err(usage)?;
     let cmd = rest.first().cloned().unwrap_or_else(|| "help".into());
     let backend = if opts.spp {
         "spp"
@@ -363,8 +362,9 @@ fn run_args<I: IntoIterator<Item = String>>(args: I) -> Result<(), TransportErro
                 .get(1)
                 .ok_or_else(|| usage(format!("anc requires an explicit mode: {ANC_MODES}")))?;
             expect_no_more_args("anc", &rest[2..]).map_err(usage)?;
-            let (label, [m, sub, noise]) = anc_scene(mode)
-                .ok_or_else(|| usage(format!("unknown anc mode: `{mode}`; expected {ANC_MODES}")))?;
+            let (label, [m, sub, noise]) = anc_scene(mode).ok_or_else(|| {
+                usage(format!("unknown anc mode: `{mode}`; expected {ANC_MODES}"))
+            })?;
             let mut t = build_transport(&opts)?;
             let dev = resolve_device(&mut t, opts.device.as_deref())?;
             attach(&mut t, &opts, &dev)?;
@@ -376,9 +376,9 @@ fn run_args<I: IntoIterator<Item = String>>(args: I) -> Result<(), TransportErro
         "game-mode" => {
             // A bare `game-mode` no longer defaults to on (#70): write
             // commands require explicit intent.
-            let mode = rest.get(1).ok_or_else(|| {
-                usage("game-mode requires an explicit value: on | off".into())
-            })?;
+            let mode = rest
+                .get(1)
+                .ok_or_else(|| usage("game-mode requires an explicit value: on | off".into()))?;
             expect_no_more_args("game-mode", &rest[2..]).map_err(usage)?;
             let on = match mode.as_str() {
                 "on" => true,
@@ -412,7 +412,9 @@ fn run_args<I: IntoIterator<Item = String>>(args: I) -> Result<(), TransportErro
             let mut gains: Vec<f64> = Vec::new();
             for raw in &rest[2..] {
                 let gain: f64 = raw.parse().map_err(|_| {
-                    usage(format!("system-eq: not a number: `{raw}` (gains are in dB)"))
+                    usage(format!(
+                        "system-eq: not a number: `{raw}` (gains are in dB)"
+                    ))
                 })?;
                 gains.push(gain);
             }
@@ -588,9 +590,9 @@ mod tests {
 
     #[test]
     fn flags_before_the_command_word_are_parsed() {
-        let (opts, rest) = parse_opts(args(&["--bluez", "--device", "AA:BB", "anc", "off"])
-            .into_iter())
-        .expect("parse succeeds");
+        let (opts, rest) =
+            parse_opts(args(&["--bluez", "--device", "AA:BB", "anc", "off"]).into_iter())
+                .expect("parse succeeds");
         assert!(opts.bluez);
         assert_eq!(opts.device.as_deref(), Some("AA:BB"));
         assert_eq!(rest, vec!["anc", "off"]);
@@ -717,7 +719,10 @@ mod tests {
         let TransportError::InvalidArgument(message) = err else {
             panic!("expected InvalidArgument, got {err:?}")
         };
-        assert!(message.contains("anc requires an explicit mode"), "{message}");
+        assert!(
+            message.contains("anc requires an explicit mode"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -735,7 +740,10 @@ mod tests {
         let TransportError::InvalidArgument(message) = err else {
             panic!("expected InvalidArgument, got {err:?}")
         };
-        assert!(message.contains("game-mode requires an explicit value"), "{message}");
+        assert!(
+            message.contains("game-mode requires an explicit value"),
+            "{message}"
+        );
     }
 
     #[test]

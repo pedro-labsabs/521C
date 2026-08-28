@@ -1134,9 +1134,8 @@ impl ConfigStorage for XdgStorage {
     }
     fn write(&mut self, value: &str) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("cannot create config dir {}: {e}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create config dir {}: {e}", parent.display()))?;
         }
         // Atomic replace: write a temp file in the same directory, then
         // rename over the target. A crash mid-write can therefore never

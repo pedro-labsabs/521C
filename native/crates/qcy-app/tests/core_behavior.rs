@@ -796,7 +796,8 @@ fn disconnect_interrupts_a_failing_re_bootstrap_promptly() {
             "Disconnect was not honored; saw: {seen:?}"
         );
         if let Some(event) = handle.try_recv_event(Duration::from_millis(20)) {
-            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty()) {
+            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty())
+            {
                 break event;
             }
             seen.push(event);
@@ -851,7 +852,8 @@ fn disconnect_is_honored_even_mid_attempt_with_a_blocking_connect() {
             "Disconnect was not honored within one attempt window"
         );
         if let Some(event) = handle.try_recv_event(Duration::from_millis(20)) {
-            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty()) {
+            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty())
+            {
                 break;
             }
         }
@@ -971,8 +973,7 @@ fn known_requested_address_does_not_attest_a_different_session_identity() {
 #[test]
 fn known_session_address_attests_the_fallback_identity() {
     // The session identity itself was confirmed: the connection starts writable.
-    let (handle, _shared) =
-        start_with_session_addr(Some(SESSION_ADDR), vec![SESSION_ADDR.into()]);
+    let (handle, _shared) = start_with_session_addr(Some(SESSION_ADDR), vec![SESSION_ADDR.into()]);
     let snapshot = scan_connect_snapshot(&handle);
     assert_eq!(snapshot.session_address.as_deref(), Some(SESSION_ADDR));
     assert!(

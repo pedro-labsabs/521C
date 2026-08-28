@@ -514,8 +514,7 @@ mod tests {
         host.control(None, MediaAction::Play).unwrap();
         let c = controls.lock().expect("controls mutex");
         assert_eq!(
-            c[0].0,
-            "org.mpris.MediaPlayer2.audacious",
+            c[0].0, "org.mpris.MediaPlayer2.audacious",
             "status and control must agree on the default player"
         );
     }
