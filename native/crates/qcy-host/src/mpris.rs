@@ -98,32 +98,41 @@ impl MprisHost {
         })
     }
 
-    /// Status of a specific player, or the first present player. Returns a default
-    /// (empty, not-playing) status when no player is available — a graceful "no media".
+    /// Status of a specific player, or the deterministic first player
+    /// ([`first_player`]). Returns a default (empty, not-playing) status when no
+    /// player is available — a graceful "no media".
     pub fn status(&self, player: Option<&str>) -> Result<MediaStatus, HostError> {
         if let Some(name) = player {
             return self.status_for(name);
         }
-        let players = self.bus.list_players()?;
-        match players.first() {
-            Some(first) => self.status_for(first),
+        match first_player(self.bus.list_players()?) {
+            Some(first) => self.status_for(&first),
             None => Ok(MediaStatus::default()),
         }
     }
 
-    /// Send a control action to a specific player, or the first present player.
+    /// Send a control action to a specific player, or the deterministic first
+    /// player ([`first_player`]).
     pub fn control(&self, player: Option<&str>, action: MediaAction) -> Result<(), HostError> {
         let target = match player {
             Some(name) => name.to_string(),
-            None => self
-                .bus
-                .list_players()?
-                .into_iter()
-                .next()
+            None => first_player(self.bus.list_players()?)
                 .ok_or_else(|| HostError::NotFound("no MPRIS player available".into()))?,
         };
         self.bus.control(&target, action)
     }
+}
+
+/// Deterministic "first player" selection (#65). D-Bus `ListNames` has no
+/// guaranteed order, and picking whatever comes back first is arbitrary — it can
+/// even differ between independent `status()` and `control()` listings, so the
+/// app could display one player and send controls to another. Candidates are
+/// therefore sorted by bus name (stable, lexicographic) and the smallest wins.
+/// Both [`MprisHost::status`] and [`MprisHost::control`] share this rule, so the
+/// default target is always the same player for a given bus snapshot.
+fn first_player(mut players: Vec<String>) -> Option<String> {
+    players.sort();
+    players.into_iter().next()
 }
 
 /* ------------------------------------------------------------------ */
@@ -418,6 +427,105 @@ mod tests {
             host.control(None, MediaAction::Play),
             Err(HostError::NotFound(_))
         ));
+    }
+
+    /// A bus that deliberately returns players in an unstable, unsorted order
+    /// (as a real D-Bus `ListNames` reply may). Pinning deterministic selection
+    /// requires a fake that does NOT pre-sort (#65).
+    struct UnsortedBus {
+        order: Vec<String>,
+        players: HashMap<String, FakePlayer>,
+        controls: ControlLog,
+    }
+
+    impl MprisBus for UnsortedBus {
+        fn list_players(&self) -> Result<Vec<String>, HostError> {
+            Ok(self.order.clone())
+        }
+        fn identity(&self, bus_name: &str) -> Result<String, HostError> {
+            Ok(self
+                .players
+                .get(bus_name)
+                .map(|p| p.identity.clone())
+                .unwrap_or_default())
+        }
+        fn playback_status(&self, bus_name: &str) -> Result<String, HostError> {
+            Ok(self
+                .players
+                .get(bus_name)
+                .map(|p| p.status.clone())
+                .unwrap_or_else(|| "Stopped".into()))
+        }
+        fn metadata(&self, bus_name: &str) -> Result<(String, String), HostError> {
+            Ok(self
+                .players
+                .get(bus_name)
+                .map(|p| (p.title.clone(), p.artist.clone()))
+                .unwrap_or_default())
+        }
+        fn volume(&self, bus_name: &str) -> Result<Option<f64>, HostError> {
+            Ok(self.players.get(bus_name).and_then(|p| p.volume))
+        }
+        fn control(&self, bus_name: &str, action: MediaAction) -> Result<(), HostError> {
+            self.controls
+                .lock()
+                .expect("controls mutex")
+                .push((bus_name.to_string(), action));
+            Ok(())
+        }
+    }
+
+    fn unsorted_host() -> (MprisHost, ControlLog) {
+        let controls = Arc::new(Mutex::new(Vec::new()));
+        let mut players = HashMap::new();
+        for (name, identity) in [
+            ("org.mpris.MediaPlayer2.vlc", "VLC"),
+            ("org.mpris.MediaPlayer2.audacious", "Audacious"),
+            ("org.mpris.MediaPlayer2.mpv", "mpv"),
+        ] {
+            players.insert(
+                name.to_string(),
+                FakePlayer {
+                    identity: identity.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let bus = UnsortedBus {
+            // Deliberately not lexicographic.
+            order: vec![
+                "org.mpris.MediaPlayer2.vlc".into(),
+                "org.mpris.MediaPlayer2.mpv".into(),
+                "org.mpris.MediaPlayer2.audacious".into(),
+            ],
+            players,
+            controls: controls.clone(),
+        };
+        (MprisHost::new(Box::new(bus)), controls)
+    }
+
+    #[test]
+    fn first_player_selection_is_deterministic_on_an_unsorted_bus() {
+        let (host, controls) = unsorted_host();
+        // The smallest bus name wins regardless of listing order.
+        let st = host.status(None).unwrap();
+        assert_eq!(st.player, "Audacious");
+        // Control targets the exact same player as status.
+        host.control(None, MediaAction::Play).unwrap();
+        let c = controls.lock().expect("controls mutex");
+        assert_eq!(
+            c[0].0, "org.mpris.MediaPlayer2.audacious",
+            "status and control must agree on the default player"
+        );
+    }
+
+    #[test]
+    fn first_player_of_empty_list_is_none() {
+        assert_eq!(first_player(Vec::new()), None);
+        assert_eq!(
+            first_player(vec!["org.mpris.MediaPlayer2.x".into()]),
+            Some("org.mpris.MediaPlayer2.x".into())
+        );
     }
 
     #[test]

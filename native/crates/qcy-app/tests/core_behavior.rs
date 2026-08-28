@@ -27,6 +27,10 @@ struct Shared {
     link_up: bool,
     /// When true, connect() fails — used to exercise re-bootstrap failures.
     fail_connect: bool,
+    /// Simulated discovery window: connect() blocks this long before it
+    /// resolves (like BlueZTransport's LE fallback window). Used to verify an
+    /// explicit Disconnect is not held hostage by a background attempt (#64a).
+    connect_block_ms: u64,
     connect_attempts: u32,
     /// Proven reads observed (keepalive coverage).
     reads: u32,
@@ -43,6 +47,9 @@ struct TestTransport {
     shared: Arc<Mutex<Shared>>,
     /// Devices reported as already connected at host level (`connected_devices`).
     connected_list: Vec<DiscoveredDevice>,
+    /// Identity holding the live session when it differs from the requested
+    /// address (dual-mode LE fallback, #67). `None` = transport does not know.
+    session_addr: Option<String>,
 }
 
 impl TestTransport {
@@ -56,6 +63,7 @@ impl TestTransport {
                 connected_model_known: false,
                 shared: Arc::clone(&shared),
                 connected_list: Vec::new(),
+                session_addr: None,
             },
             shared,
         )
@@ -81,16 +89,20 @@ impl Transport for TestTransport {
     }
 
     fn connect(&mut self, _address: &str) -> Result<(), TransportError> {
-        {
+        let (block_ms, fail) = {
             let mut shared = self.shared.lock().expect("shared mutex");
             shared.connect_attempts += 1;
-            if shared.fail_connect {
-                return Err(TransportError::DeviceOutOfRange);
-            }
-            shared.link_up = true;
+            (shared.connect_block_ms, shared.fail_connect)
+        };
+        if block_ms > 0 {
+            std::thread::sleep(Duration::from_millis(block_ms));
+        }
+        if fail {
+            return Err(TransportError::DeviceOutOfRange);
         }
         self.connected = true;
         self.connected_model_known = self.model_known;
+        self.shared.lock().expect("shared mutex").link_up = true;
         Ok(())
     }
 
@@ -103,6 +115,10 @@ impl Transport for TestTransport {
 
     fn is_connected(&mut self) -> Result<bool, TransportError> {
         Ok(self.connected && self.shared.lock().expect("shared mutex").link_up)
+    }
+
+    fn session_address(&mut self) -> Option<String> {
+        self.connected.then(|| self.session_addr.clone()).flatten()
     }
 
     fn read(&mut self, char_uuid: &str) -> Result<Vec<u8>, TransportError> {
@@ -739,5 +755,263 @@ fn re_bootstrap_failures_are_surfaced_once_per_error() {
     // Once the blocker clears, the session restores itself.
     shared.lock().expect("shared mutex").fail_connect = false;
     recv_until(&handle, |e| matches!(e, AppEvent::SessionRestored { .. }));
+    handle.shutdown();
+}
+
+#[test]
+fn disconnect_interrupts_a_failing_re_bootstrap_promptly() {
+    // #64a: while re-bootstrap attempts are failing, an explicit Disconnect
+    // must be honored promptly (bounded, < 2 supervisor ticks with the fast
+    // test timing) — never behind a full cooldown/retry cycle.
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+
+    {
+        let mut s = shared.lock().expect("shared mutex");
+        s.link_up = false;
+        s.fail_connect = true;
+    }
+    recv_until(&handle, |e| matches!(e, AppEvent::SessionLost { .. }));
+    // Wait until the failing re-bootstrap loop is underway, then drain the
+    // queue quiet so the disconnect's StateChanged is unambiguous.
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::Error(msg) if msg.starts_with("re-bootstrap:")),
+    );
+    while handle.try_recv_event(Duration::from_millis(40)).is_some() {}
+
+    let sent = std::time::Instant::now();
+    handle.send(AppCommand::Disconnect).unwrap();
+    // The disconnect resets the snapshot: the distinguishing marker is the
+    // cleared address (the SessionLost snapshot still carries it).
+    let mut seen = Vec::new();
+    let deadline = sent + Duration::from_secs(2);
+    let disconnected = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Disconnect was not honored; saw: {seen:?}"
+        );
+        if let Some(event) = handle.try_recv_event(Duration::from_millis(20)) {
+            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty())
+            {
+                break event;
+            }
+            seen.push(event);
+        }
+    };
+    let elapsed = sent.elapsed();
+    let _ = disconnected;
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "Disconnect took {elapsed:?}; two supervisor ticks are 20 ms"
+    );
+
+    // The supervisor stays disarmed: no further connect attempts.
+    let attempts = shared.lock().expect("shared mutex").connect_attempts;
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        shared.lock().expect("shared mutex").connect_attempts,
+        attempts,
+        "no background reconnect after explicit disconnect"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn disconnect_is_honored_even_mid_attempt_with_a_blocking_connect() {
+    // #64a with a simulated discovery window: the background attempt blocks
+    // 200 ms (like BlueZ's LE fallback window). The Disconnect may wait out
+    // the in-flight attempt (the transport's connect is not cancellable), but
+    // it must be applied immediately after it — never behind a second attempt.
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+
+    {
+        let mut s = shared.lock().expect("shared mutex");
+        s.link_up = false;
+        s.fail_connect = true;
+        s.connect_block_ms = 200;
+    }
+    recv_until(&handle, |e| matches!(e, AppEvent::SessionLost { .. }));
+    // Let a blocking attempt start, then disconnect mid-attempt.
+    std::thread::sleep(Duration::from_millis(50));
+    let sent = std::time::Instant::now();
+    handle.send(AppCommand::Disconnect).unwrap();
+    let deadline = sent + Duration::from_secs(3);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Disconnect was not honored within one attempt window"
+        );
+        if let Some(event) = handle.try_recv_event(Duration::from_millis(20)) {
+            if matches!(event, AppEvent::StateChanged(ref snap) if !snap.connected && snap.address.is_empty())
+            {
+                break;
+            }
+        }
+    }
+    let elapsed = sent.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "Disconnect waited {elapsed:?}; one 200 ms attempt plus margin is the bound"
+    );
+    // No second attempt may follow the disconnect.
+    let attempts = shared.lock().expect("shared mutex").connect_attempts;
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        shared.lock().expect("shared mutex").connect_attempts,
+        attempts,
+        "no further re-bootstrap attempts after explicit disconnect"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn supervisor_ticks_run_under_continuous_command_traffic() {
+    // #64b: ticks are driven by elapsed time, not by queue emptiness. Under a
+    // continuous command flood the supervisor must still detect link loss
+    // (and keep the keepalive alive) within a bounded time.
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (handle, shared) = start_supervised(true);
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    recv_until(
+        &handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+
+    // Flood the command channel faster than the tick rate.
+    let stop = Arc::new(AtomicBool::new(false));
+    let flooder = {
+        let stop = Arc::clone(&stop);
+        let commands = handle.commands.clone();
+        std::thread::Builder::new()
+            .name("flooder".into())
+            .spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if commands.send(AppCommand::RefreshStatus).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+            .expect("flooder spawns")
+    };
+
+    // Drop the link while the flood continues: link-loss detection must not
+    // starve.
+    shared.lock().expect("shared mutex").link_up = false;
+    let lost_at = std::time::Instant::now();
+    recv_until(&handle, |e| matches!(e, AppEvent::SessionLost { .. }));
+    let detection = lost_at.elapsed();
+    assert!(
+        detection < Duration::from_millis(500),
+        "link-loss detection starved under command traffic: took {detection:?}"
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = flooder.join();
+    handle.shutdown();
+}
+
+/* #67: attestation correlates with the session identity, not the request */
+
+const SESSION_ADDR: &str = "11:22:33:44:55:66";
+
+fn start_with_session_addr(
+    session_addr: Option<&str>,
+    known_devices: Vec<String>,
+) -> (qcy_app::core::AppHandle, Arc<Mutex<Shared>>) {
+    let (mut transport, shared) = TestTransport::new(false);
+    transport.session_addr = session_addr.map(|a| a.to_string());
+    (
+        AppCore::start(Box::new(transport), HostServices::default(), known_devices),
+        shared,
+    )
+}
+
+fn scan_connect_snapshot(handle: &qcy_app::core::AppHandle) -> qcy_app::core::DeviceSnapshot {
+    handle.send(AppCommand::Scan).unwrap();
+    recv_until(handle, |e| matches!(e, AppEvent::Discovered(_)));
+    handle.send(AppCommand::Connect(ADDR.into())).unwrap();
+    let event = recv_until(
+        handle,
+        |e| matches!(e, AppEvent::StateChanged(s) if s.connected),
+    );
+    let AppEvent::StateChanged(snapshot) = event else {
+        unreachable!()
+    };
+    snapshot
+}
+
+#[test]
+fn known_requested_address_does_not_attest_a_different_session_identity() {
+    // The requested address was confirmed before, but the live session is
+    // held by a fallback identity: the connection must stay read-only.
+    let (handle, shared) = start_with_session_addr(Some(SESSION_ADDR), vec![ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address.as_deref(), Some(SESSION_ADDR));
+    assert!(
+        !snapshot.model_known,
+        "attestation must not transfer from the requested address to an unknown session identity"
+    );
+    // Writes are denied read-only.
+    handle.send(AppCommand::SetNoise(SimpleNoise::Anc)).unwrap();
+    recv_until(&handle, |e| matches!(e, AppEvent::Denied(_)));
+    assert!(shared.lock().expect("shared mutex").writes.is_empty());
+    handle.shutdown();
+}
+
+#[test]
+fn known_session_address_attests_the_fallback_identity() {
+    // The session identity itself was confirmed: the connection starts writable.
+    let (handle, _shared) = start_with_session_addr(Some(SESSION_ADDR), vec![SESSION_ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address.as_deref(), Some(SESSION_ADDR));
+    assert!(
+        snapshot.model_known,
+        "a confirmed session identity must start writable"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn without_session_address_knowledge_the_requested_address_still_correlates() {
+    // Transport does not know the session identity (default None): the
+    // pre-#67 requested-address correlation stays intact.
+    let (handle, _shared) = start_with_session_addr(None, vec![ADDR.into()]);
+    let snapshot = scan_connect_snapshot(&handle);
+    assert_eq!(snapshot.session_address, None);
+    assert!(snapshot.model_known);
+    handle.shutdown();
+}
+
+#[test]
+fn confirm_model_persists_the_session_address() {
+    // Confirming the model while the session is held by a fallback identity
+    // must persist THAT identity, so the next connect auto-attests it.
+    let (handle, _shared) = start_with_session_addr(Some(SESSION_ADDR), Vec::new());
+    scan_connect_snapshot(&handle);
+    handle
+        .send(AppCommand::ConfirmModel {
+            address: ADDR.into(),
+        })
+        .unwrap();
+    let event = recv_until(&handle, |e| matches!(e, AppEvent::ModelConfirmed { .. }));
+    assert_eq!(
+        event,
+        AppEvent::ModelConfirmed {
+            address: SESSION_ADDR.into()
+        },
+        "the persisted attestation must target the session identity"
+    );
     handle.shutdown();
 }
