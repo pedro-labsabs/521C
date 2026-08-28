@@ -99,7 +99,7 @@ export function HubShell() {
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">521C</div>
             <div className="truncate text-xs text-fg-muted">
-              L {bpct(device.telemetryKnown, device.battery.left.level)} · R {bpct(device.telemetryKnown, device.battery.right.level)} · {currentNoiseUi(device)}
+              L {bpct(device.telemetryKnown, device.battery.left.level)} · R {bpct(device.telemetryKnown, device.battery.right.level)} · {currentNoiseUi(device) ?? "—"}
             </div>
           </div>
         </button>

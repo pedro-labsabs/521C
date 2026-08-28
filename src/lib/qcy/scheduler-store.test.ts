@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { transportForTests, useHub } from "./hub-store";
+import { currentNoiseUi, transportForTests, useHub } from "./hub-store";
 import type { SmartProfile } from "./smart-profiles";
+import { Cmd, set } from "./protocol";
 import { MockTransport } from "./transport";
 
 describe("applyProfile structured results (issue #10)", () => {
@@ -77,3 +78,95 @@ describe("coalesced latest-value controls through the store", () => {
     expect(useHub.getState().device.soundBalance).toBe(90);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Read-before-write gating for unknown device state (#62)             */
+/* ------------------------------------------------------------------ */
+
+describe("store gating while device state is unknown (#62)", () => {
+  beforeAll(async () => {
+    await useHub.getState().scan();
+    const id = useHub.getState().discovered[0]!.id;
+    await useHub.getState().connect(id);
+  });
+
+  it("currentNoiseUi is null while the ANC scene is unknown", () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, ancScene: null, noiseMode: -1 } });
+    try {
+      expect(currentNoiseUi(useHub.getState().device)).toBeNull();
+      // A known scene decodes as before.
+      expect(
+        currentNoiseUi({
+          ...d,
+          ancScene: { mode: 0x01, subScene: 0x04, noiseValue: 0x00 },
+        }),
+      ).toBe("wind");
+    } finally {
+      useHub.setState({ device: d });
+    }
+  });
+
+  it("setBinding refuses while the bindings table is unknown", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, bindings: null }, toast: null });
+    try {
+      await useHub.getState().setBinding(0x01, 0x03);
+      const s = useHub.getState();
+      // No write happened: the table is still unknown, not fabricated.
+      expect(s.device.bindings).toBeNull();
+      expect(s.toast?.title).toBe("Write blocked");
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("setBinding merges into the table read from the device when known", async () => {
+    const d = useHub.getState().device;
+    const table = [
+      { keyId: 0x01, funId: 0x02 },
+      { keyId: 0x02, funId: 0x09 },
+    ];
+    useHub.setState({ device: { ...d, bindings: table }, toast: null });
+    try {
+      await useHub.getState().setBinding(0x01, 0x05);
+      const bindings = useHub.getState().device.bindings;
+      expect(bindings).toEqual([
+        { keyId: 0x01, funId: 0x05 },
+        { keyId: 0x02, funId: 0x09 }, // untouched key keeps the read value
+      ]);
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("setWear refuses while wear settings are unknown", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({ device: { ...d, wear: null }, toast: null });
+    try {
+      await useHub.getState().setWear({ enabled: false });
+      const s = useHub.getState();
+      expect(s.device.wear).toBeNull();
+      expect(s.toast?.title).toBe("Write blocked");
+    } finally {
+      useHub.setState({ device: d, toast: null });
+    }
+  });
+
+  it("chime preflight treats unknown worn state as unknown, never not-worn", async () => {
+    const d = useHub.getState().device;
+    useHub.setState({
+      device: { ...d, wear: null, wornLeft: null, wornRight: null },
+      pendingChime: null,
+    });
+    try {
+      useHub.getState().requestChime("left");
+      const pre = useHub.getState().pendingChime;
+      expect(pre?.status).toBe("confirm-strong");
+      expect(pre?.unknownTargets).toEqual(["left"]);
+    } finally {
+      useHub.setState({ device: d, pendingChime: null });
+    }
+  });
+});
+

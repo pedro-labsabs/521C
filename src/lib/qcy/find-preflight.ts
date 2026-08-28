@@ -26,8 +26,13 @@ export type PreflightStatus = "blocked-worn" | "confirm-strong" | "confirm";
 export type WearEvidence = {
   /** Wear/in-ear detection enabled. When false, worn state is unreliable. */
   detectionEnabled: boolean;
-  wornLeft: boolean;
-  wornRight: boolean;
+  /**
+   * Null = never observed (real sessions start unknown, issue #62). Unknown
+   * is treated like a missing signal: it escalates to confirm-strong and is
+   * never read as "not worn".
+   */
+  wornLeft: boolean | null;
+  wornRight: boolean | null;
 };
 
 export type ChimePreflight = {
@@ -61,7 +66,7 @@ export function evaluateChimePreflight(side: ChimeSide, wear: WearEvidence): Chi
 
   for (const t of targets) {
     const worn = t === "left" ? wear.wornLeft : wear.wornRight;
-    if (!wear.detectionEnabled) unknownTargets.push(t);
+    if (!wear.detectionEnabled || worn === null) unknownTargets.push(t);
     else if (worn) wornTargets.push(t);
     else notWornTargets.push(t);
   }
