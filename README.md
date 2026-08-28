@@ -12,6 +12,8 @@ This repository is configured for Jcode as its primary long-running autonomous c
 
 - `JCODE_AGENT_START.md` — canonical initial instruction for taking the project through the backlog to release readiness.
 - `.jcode/prompt-overlay.md` — Jcode project overlay loaded automatically in new Jcode sessions.
+- `.jcode/skills/` — project-local skills; the only skills surface in this repository.
+- `.specify/` + `.jcode/speckit/` — Spec Kit (specify CLI) project infrastructure and CLI-managed command files.
 - `AGENTS.md` — repository-wide engineering contract.
 - `docs/PRODUCT_SPEC.md` — finished-product intent and scope.
 - `docs/AUTONOMOUS_EXECUTION.md` — dependency-aware delivery graph, per-issue loop and final release checklist.
@@ -58,6 +60,9 @@ capabilities and never generate earbud writes.
 ```text
 .
 ├── .jcode/prompt-overlay.md      # Jcode project operating policy
+├── .jcode/skills/                # project skills (single skills surface)
+├── .jcode/speckit/commands/      # Spec Kit command files (CLI-managed)
+├── .specify/                     # Spec Kit project infrastructure (specify CLI)
 ├── JCODE_AGENT_START.md          # autonomous delivery bootstrap
 ├── AGENTS.md                     # operating contract for coding agents
 ├── CONTRIBUTING.md

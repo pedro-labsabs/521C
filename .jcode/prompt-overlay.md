@@ -55,6 +55,10 @@ Read `docs/HOST_SAFETY.md` before installing packages, changing services, touchi
 
 Never use host-destructive shortcuts to make development easier. In particular, do not disable security controls, replace the Bluetooth daemon, recursively delete broad paths, rewrite unrelated user configuration, expose services to the LAN by default, or use destructive BLE commands.
 
+## Skills surface
+
+Project skills live exclusively in `.jcode/skills/<skill-name>/SKILL.md`, the Jcode project-local surface. The Spec Kit (speckit) integration keeps CLI-managed command files in `.jcode/speckit/commands/` and project infrastructure in `.specify/`; those are Spec Kit state, not skills. Do not create or keep skills in other agent-directory conventions (`.claude/skills`, `.agents/skills`, `.cursor`, `.github/prompts`, etc.). If a tool tries to write skills outside `.jcode`, move them into `.jcode/skills/` or configure the tool to target `.jcode`.
+
 ## Protocol honesty
 
 A feature existing in the official QCY mobile app is not proof of a Linux-accessible command. Do not invent protocol facts. Every trusted write must be backed by the repository's evidence model and central authorization policy once implemented.
