@@ -127,6 +127,11 @@ export type ParseResult<T> =
 /* Small validators                                                    */
 /* ------------------------------------------------------------------ */
 
+// Must stay in sync with the NoiseUiMode union (smart-profiles.ts). The
+// round-trip test in config-schema.test.ts iterates every union member, so a
+// new mode that is not added here fails the suite instead of silently
+// rejecting persisted configs at load time (issue #63: a "wind" profile used
+// to wipe the entire persisted config).
 const NOISE_MODES: readonly NoiseUiMode[] = [
   "off",
   "anc",
@@ -134,6 +139,7 @@ const NOISE_MODES: readonly NoiseUiMode[] = [
   "indoor",
   "commuting",
   "noisy",
+  "wind",
   "transparency",
 ];
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { NoiseUiMode } from "./smart-profiles";
 import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_CONFIG,
@@ -118,6 +119,49 @@ describe("config schema round-trip", () => {
     const loaded = loadPersistedConfig(storage);
     expect(loaded.usedDefaults).toBe(false);
     expect(loaded.config).toEqual(cfg);
+  });
+
+  it("every NoiseUiMode member round-trips through persist -> load (#63)", () => {
+    // Exhaustive by construction: a new union member missing from this record
+    // is a compile error. This is the gap that let "wind" diverge from
+    // NOISE_MODES and reject the entire persisted config at load time.
+    const allModes: Record<NoiseUiMode, true> = {
+      off: true,
+      anc: true,
+      adaptive: true,
+      indoor: true,
+      commuting: true,
+      noisy: true,
+      wind: true,
+      transparency: true,
+    };
+    for (const mode of Object.keys(allModes) as NoiseUiMode[]) {
+      const storage = new MemStorage();
+      const cfg = validPersisted({
+        customProfiles: [validProfile({ id: `p-${mode}`, noise: mode })],
+      });
+      savePersistedConfig(storage, cfg);
+      const loaded = loadPersistedConfig(storage);
+      expect(loaded.usedDefaults, `noise mode "${mode}" rejected on load`).toBe(false);
+      expect(loaded.errors, `noise mode "${mode}" produced errors`).toEqual([]);
+      expect(loaded.config.customProfiles[0]?.noise).toBe(mode);
+      // The same payload must also survive the export/import boundary.
+      const imported = parseImport(buildExport(loaded.config));
+      expect(imported.ok, `noise mode "${mode}" rejected on import`).toBe(true);
+    }
+  });
+
+  it("a wind profile persists and reloads valid (regression, #63)", () => {
+    const storage = new MemStorage();
+    const cfg = validPersisted({
+      customProfiles: [validProfile({ id: "windy", noise: "wind" })],
+    });
+    savePersistedConfig(storage, cfg);
+    const loaded = loadPersistedConfig(storage);
+    expect(loaded.usedDefaults).toBe(false);
+    expect(loaded.config.customProfiles[0]?.noise).toBe("wind");
+    expect(loaded.config.theme).toBe(cfg.theme);
+    expect(loaded.config.customEq).toEqual(cfg.customEq);
   });
 
   it("export never includes local-only or runtime fields", () => {
