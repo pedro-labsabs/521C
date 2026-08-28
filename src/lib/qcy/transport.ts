@@ -14,6 +14,7 @@ import {
   parseKeyFunctionBytes,
   parseManufacturerData,
   parseWear,
+  request,
   QCY_COMPANY_ID,
   cmdName,
   enableByte,
@@ -76,19 +77,39 @@ export type DeviceLiveState = {
   battery: BatteryState;
   firmware: { left: string; right?: string };
   rssi: number;
+  /**
+   * Legacy noise-mode byte. Derived from the validated 0x17 ANC scene when
+   * one is known; -1 means unknown (real sessions start unknown, issue #62).
+   */
   noiseMode: number;
-  ancScene: AncScene;
+  /**
+   * Last observed 0x17 AncSetting scene. Null until the device reports or
+   * 521C writes one — real sessions must not show a placeholder scene
+   * (issue #62).
+   */
+  ancScene: AncScene | null;
   adaptive: boolean;
   gameMode: boolean;
   sleepMode: boolean;
   spatial: boolean;
   inEar: boolean;
-  wornLeft: boolean;
-  wornRight: boolean;
-  wear: WearSettings;
+  /** Null = unknown (never observed on a real session). */
+  wornLeft: boolean | null;
+  wornRight: boolean | null;
+  /**
+   * Null = unknown. Writes that rebuild the full wear payload (setWear) are
+   * refused while this is null so app defaults never overwrite unread device
+   * state (issue #62).
+   */
+  wear: WearSettings | null;
   eq: EqPreset;
   eqName: string;
-  bindings: KeyBinding[];
+  /**
+   * Touch-mapping table. Null = unknown: it must be read from the device
+   * before any mapping write, because a mapping write transmits the ENTIRE
+   * table (issue #62).
+   */
+  bindings: KeyBinding[] | null;
   ldacRequested: boolean;
   soundBalance: number;
   audio: AudioGraph;
@@ -194,6 +215,12 @@ export function createInitialState(partial?: Partial<DeviceLiveState>): DeviceLi
  * Initial state for a real-device session (issue #2). Telemetry starts unknown rather
  * than borrowing mock battery/firmware/settings values; the initial state sync and
  * subsequent notifications populate proven fields and flip `telemetryKnown`.
+ *
+ * State-bearing settings slices are unknown too (issue #62): worn flags, wear
+ * settings, the ANC scene and the touch-mapping table are null/-1 until they
+ * are read from the device or written by the user. Inheriting mock values
+ * here used to let writes rebuild whole payloads from app defaults, silently
+ * resetting the user's device settings.
  */
 export function createRealInitialState(partial?: Partial<DeviceLiveState>): DeviceLiveState {
   return createInitialState({
@@ -206,6 +233,13 @@ export function createRealInitialState(partial?: Partial<DeviceLiveState>): Devi
     },
     firmware: { left: "" },
     rssi: 0,
+    noiseMode: -1,
+    ancScene: null,
+    adaptive: false,
+    wornLeft: null,
+    wornRight: null,
+    wear: null,
+    bindings: null,
     eqName: "",
     audio: {
       codec: "unknown",
@@ -386,7 +420,9 @@ export class MockTransport implements QcyTransport {
       return Uint8Array.from([a, b, c]);
     }
     if (charUuid.toLowerCase() === CHAR.keyFunctionV2) {
-      return encodeKeyFunctionDirect(this.state.bindings);
+      // The mock table is always populated; real sessions read this char in
+      // initialSync and stay unknown when it is absent (#62).
+      return encodeKeyFunctionDirect(this.state.bindings ?? []);
     }
     return new Uint8Array();
   }
@@ -398,7 +434,8 @@ export class MockTransport implements QcyTransport {
 
   setWorn(left: boolean, right: boolean) {
     this.state = { ...this.state, wornLeft: left, wornRight: right };
-    if (this.state.wear.enabled && !left && !right && this.state.wear.musicIndex === 1) {
+    const wear = this.state.wear;
+    if (wear?.enabled && !left && !right && wear.musicIndex === 1) {
       this.state = { ...this.state, media: { ...this.state.media, playing: false } };
     }
     this.push();
@@ -420,12 +457,13 @@ export class MockTransport implements QcyTransport {
         this.emitRx(respond(Cmd.Version, [a, b, c, a, b, c]));
         return;
       }
-      case Cmd.NoiseCancelMode: {
-        if (p.length) this.state = { ...this.state, noiseMode: p[0]!, adaptive: false };
-        this.emitRx(respond(Cmd.NoiseCancelMode, [this.state.noiseMode]));
-        this.push();
+      case Cmd.NoiseCancelMode:
+        // 0x0C is falsified on the live HT08 unit (2026-08-27): the device
+        // ignores these writes — no ACK, no state change. The mock mirrors
+        // the evidenced hardware instead of simulating a fake success (#71).
+        // Policy gating is unaffected: 0x0C stays experimental and only
+        // reaches this point behind the session opt-in.
         return;
-      }
       case Cmd.AncSetting: {
         if (p.length >= 3) {
           this.state = {
@@ -437,7 +475,7 @@ export class MockTransport implements QcyTransport {
             adaptive: p[0] === 0x01 && p[1] === 0x05,
           };
         }
-        const s = this.state.ancScene;
+        const s = this.state.ancScene ?? { mode: 0x01, subScene: 0x01, noiseValue: 0x02 };
         this.emitRx(respond(Cmd.AncSetting, [s.mode, s.subScene, s.noiseValue]));
         this.push();
         return;
@@ -509,11 +547,11 @@ export class MockTransport implements QcyTransport {
               enabled: p[0] === 0x01,
               musicIndex: p[1]!,
               ancIndex: p[2]!,
-              toneEnable: p.length >= 4 ? p[3] === 0x01 : this.state.wear.toneEnable,
+              toneEnable: p.length >= 4 ? p[3] === 0x01 : (this.state.wear?.toneEnable ?? true),
             },
           };
         }
-        const w = this.state.wear;
+        const w = this.state.wear ?? { enabled: true, musicIndex: 1, ancIndex: 0, toneEnable: true };
         this.emitRx(
           respond(Cmd.WearingDetection, [
             w.enabled ? 0x01 : 0x02,
@@ -548,7 +586,7 @@ export class MockTransport implements QcyTransport {
         return;
       }
       case Cmd.KeyFunction:
-        this.emitRx(encodeCommand(Cmd.KeyFunction, encodeKeyFunctionDirect(this.state.bindings)));
+        this.emitRx(encodeCommand(Cmd.KeyFunction, encodeKeyFunctionDirect(this.state.bindings ?? [])));
         return;
       case Cmd.RenameDevice: {
         if (p.length) {
@@ -686,18 +724,24 @@ export function reducePacketIntoState(
       case Cmd.AncSetting: {
         const ancScene = parseAncScene(p);
         if (ancScene) {
-          next = { ...next, ancScene };
+          // The ANC scene state is derived ONLY from the validated 0x17
+          // (mode, subScene) table. noiseMode/adaptive follow the scene (as
+          // currentNoiseUi does) so touch-sensor scene changes cannot leave
+          // them stale (#71).
+          next = {
+            ...next,
+            ancScene,
+            noiseMode: ancScene.mode === 0x02 ? 0x00 : ancScene.mode === 0x03 ? 0x03 : 0x01,
+            adaptive: ancScene.mode === 0x01 && ancScene.subScene === 0x05,
+          };
           changed = true;
         }
         break;
       }
-      case Cmd.NoiseCancelMode: {
-        if (p.length >= 1) {
-          next = { ...next, noiseMode: p[0]! };
-          changed = true;
-        }
+      case Cmd.NoiseCancelMode:
+        // 0x0C is falsified on HT08 (ignored by the device, 2026-08-27).
+        // UI ANC state must never be derived from 0x0C packets (#71).
         break;
-      }
       case Cmd.LowLatency: {
         if (p.length >= 1) {
           next = { ...next, gameMode: parseEnable(p[0]!) };
@@ -913,7 +957,18 @@ export class WebBluetoothTransport implements QcyTransport {
     }
   }
 
-  /** Documented initial state sync after connect: read battery and firmware. */
+  /**
+   * Documented initial state sync after connect: read battery and firmware,
+   * then read-before-write for the state-bearing settings (issue #62).
+   *
+   * The touch-mapping table is read from its direct characteristic. Wear
+   * settings (0x2C) and the ANC scene (0x17) have no readable GATT
+   * characteristic, so they are requested framed via RequestData and arrive
+   * asynchronously as notifications reduced into state. Any slice that
+   * cannot be read stays unknown (null / -1); the store then refuses writes
+   * that would rebuild a whole payload from app defaults over unread device
+   * state.
+   */
   private async initialSync(): Promise<void> {
     let changed = false;
     try {
@@ -939,6 +994,26 @@ export class WebBluetoothTransport implements QcyTransport {
       }
     } catch {
       /* best-effort */
+    }
+    try {
+      const keyBytes = await this.read(CHAR.keyFunctionV2);
+      if (keyBytes.length) {
+        const bindings = parseKeyFunctionBytes(keyBytes);
+        if (bindings.length > 0) {
+          this.state = { ...this.state, bindings };
+          changed = true;
+        }
+      }
+    } catch {
+      // Characteristic unreadable: bindings stay unknown and setBinding
+      // refuses rather than writing app defaults over the device table.
+    }
+    for (const req of [request.wear(), request.ancSetting()]) {
+      try {
+        await this.write(req);
+      } catch {
+        // Best-effort request: the corresponding slice stays unknown.
+      }
     }
     if (changed) this.events?.onState(this.state);
   }

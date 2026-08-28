@@ -9,6 +9,7 @@ import {
   UUID_EVIDENCE,
 } from "./evidence";
 import { GENERIC_QCY_PROFILE, HT08_PROFILE } from "../device/catalog";
+import { HT08_CAPABILITIES } from "../device/capabilities";
 
 /**
  * Evidence governance: these tests are the review rule that keeps the write
@@ -99,6 +100,69 @@ describe("write policy is derived from the ledger", () => {
     expect(GENERIC_QCY_PROFILE.writePolicy.supportedOpcodes.size).toBe(0);
     expect(GENERIC_QCY_PROFILE.writePolicy.experimentalOpcodes.size).toBe(0);
     expect(GENERIC_QCY_PROFILE.writePolicy.directChars.size).toBe(0);
+  });
+});
+
+describe("ledger <-> capability matrix cross-references (#69)", () => {
+  it("every ledger capability reference is a real capability key", () => {
+    const keys = new Set(Object.keys(HT08_CAPABILITIES));
+    for (const [op, e] of OPCODE_EVIDENCE) {
+      if (e.capability !== undefined) {
+        expect(
+          keys.has(e.capability),
+          `0x${op.toString(16)} (${e.name}) points at unknown capability "${e.capability}"`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("every capability opcode reference is a real ledger entry", () => {
+    for (const [key, cap] of Object.entries(HT08_CAPABILITIES)) {
+      if (cap.opcode !== undefined) {
+        expect(
+          OPCODE_EVIDENCE.has(cap.opcode),
+          `capability "${key}" points at uncatalogued opcode 0x${cap.opcode.toString(16)}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("writable/experimental capabilities reference matching ledger trust levels", () => {
+    // The audit's stale links (0x0C -> ancOn, 0x17 -> ancLevels, 0x32 ->
+    // ancAdaptive) derived wrong readiness from the join; pin the directions
+    // that must always agree.
+    for (const [key, cap] of Object.entries(HT08_CAPABILITIES)) {
+      if (cap.opcode === undefined) continue;
+      const ledger = OPCODE_EVIDENCE.get(cap.opcode);
+      if (!ledger) continue;
+      if (cap.write === "writable") {
+        expect(
+          ledger.trustLevel,
+          `capability "${key}" is writable but 0x${cap.opcode.toString(16)} is ${ledger.trustLevel}`,
+        ).toBe("write-supported");
+      }
+      if (cap.write === "experimental") {
+        expect(
+          ledger.trustLevel,
+          `capability "${key}" is experimental but 0x${cap.opcode.toString(16)} is ${ledger.trustLevel}`,
+        ).toBe("write-experimental");
+      }
+      if (cap.write === "forbidden") {
+        expect(
+          ledger.trustLevel,
+          `capability "${key}" is forbidden but 0x${cap.opcode.toString(16)} is ${ledger.trustLevel}`,
+        ).toBe("destructive");
+      }
+    }
+  });
+
+  it("no falsified/unvalidated opcode link survives in the ledger (#69)", () => {
+    // 0x0C is falsified on HT08 and 0x32 is unvalidated there: neither may
+    // claim a capability that the matrix validates through 0x17.
+    expect(OPCODE_EVIDENCE.get(0x0c)?.capability).toBeUndefined();
+    expect(OPCODE_EVIDENCE.get(0x32)?.capability).toBeUndefined();
+    // 0x17 backs the scene capabilities, not adjustable levels.
+    expect(OPCODE_EVIDENCE.get(0x17)?.capability).not.toBe("ancLevels");
   });
 });
 

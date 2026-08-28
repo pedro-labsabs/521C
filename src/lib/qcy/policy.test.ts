@@ -113,26 +113,42 @@ describe("central write policy · experimental opt-in", () => {
     expect(denialOf(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, enable))?.code)
       .toBe("experimental-opt-in-required");
     expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, enable).ok).toBe(true);
-    // 0x0C "off" is 0x00, which does not match the 0x02 pure-disable
-    // convention, so it is gated the same way until re-evidenced.
+    // 0x0C "off" is 0x00. Every 0x0C payload requires opt-in.
     const disable = encodeCommand(Cmd.NoiseCancelMode, [0x00]);
     expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, disable).ok).toBe(false);
     expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, disable).ok).toBe(true);
   });
 
-  it("allows disabling an experimental opcode without opt-in (safe cleanup)", () => {
-    const frame = encodeCommand(Cmd.EnvAdaptation, [0x02]);
-    expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, frame).ok).toBe(true);
+  it("denies NoiseCancelMode 0x0C [0x02] without opt-in (regression, #60)", () => {
+    // 0x0C payload semantics are 0 off / 1 ANC / 2 outdoor / 3 transparency:
+    // [0x02] is outdoor mode, a state mutation, NOT a disable. The removed
+    // pure-disable carve-out used to authorize it without opt-in.
+    const outdoor = encodeCommand(Cmd.NoiseCancelMode, [0x02]);
+    const result = authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, outdoor);
+    expect(result.ok).toBe(false);
+    expect(denialOf(result)?.code).toBe("experimental-opt-in-required");
+    expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, outdoor).ok).toBe(true);
   });
 
-  it("denies enabling experimental EnvAdaptation without opt-in but allows disabling it", () => {
+  it("denies disabling an experimental opcode without opt-in (no pure-disable carve-out, #60)", () => {
+    // The policy no longer special-cases [0x02]: payload meaning is
+    // opcode-specific, so every experimental write needs the session opt-in.
+    const frame = encodeCommand(Cmd.EnvAdaptation, [0x02]);
+    const result = authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, frame);
+    expect(result.ok).toBe(false);
+    expect(denialOf(result)?.code).toBe("experimental-opt-in-required");
+    expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, frame).ok).toBe(true);
+  });
+
+  it("gates every experimental EnvAdaptation payload behind the opt-in", () => {
     // 0x32 EnvAdaptation stays experimental in the ledger (unvalidated on the
-    // live HT08; the validated adaptive path is 0x17 payload (1,5,2)). The
-    // policy itself must still gate enable and allow safe disable.
+    // live HT08; the validated adaptive path is 0x17 payload (1,5,2)). Enable
+    // and disable alike require opt-in.
     const enable = encodeCommand(Cmd.EnvAdaptation, [0x01]);
     expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, enable).ok).toBe(false);
     const disable = encodeCommand(Cmd.EnvAdaptation, [0x02]);
-    expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, disable).ok).toBe(true);
+    expect(authorizeFrameWrite(HT08_PROFILE, NO_OPT_IN, disable).ok).toBe(false);
+    expect(authorizeFrameWrite(HT08_PROFILE, OPTED_IN, disable).ok).toBe(true);
   });
 });
 

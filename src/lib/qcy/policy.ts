@@ -54,13 +54,6 @@ function deny(code: WriteDenialCode, message: string, opcode?: number): WriteAut
   return { ok: false, denial: { code, message, opcode } };
 }
 
-/** Byte that disables an enable/disable-style command (see enableByte). */
-const DISABLE_BYTE = 0x02;
-
-function isPureDisable(params: Uint8Array): boolean {
-  return params.length === 1 && params[0] === DISABLE_BYTE;
-}
-
 /**
  * Authorize a framed write (one or more command blocks written to the command
  * characteristic). Every block must be allowed for the write to proceed.
@@ -113,11 +106,13 @@ export function authorizeFrameWrite(
     }
 
     if (policy.experimentalOpcodes.has(cmd)) {
-      // Disabling an experimental feature is always safe; enabling it requires
-      // an explicit session opt-in.
-      if (isPureDisable(block.params)) {
-        continue;
-      }
+      // Every experimental-opcode write requires the session opt-in, whatever
+      // the payload. There is deliberately no "pure disable" carve-out: the
+      // meaning of a payload byte is opcode-specific (for 0x0C NoiseCancelMode
+      // [0x02] is outdoor mode, not a disable), so a byte-value exception
+      // authorizes state mutations it cannot understand. This matches the
+      // native Rust policy, which has no such exception (issue #60; see
+      // docs/SECURITY_MODEL.md claim (b)).
       if (optIn.experimental) {
         continue;
       }
