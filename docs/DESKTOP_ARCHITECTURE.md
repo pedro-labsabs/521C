@@ -171,12 +171,15 @@ The desktop app owns the device-write side of Auto Game Mode:
 
 ## 8. Packaging
 
-- Baseline artifact: **AppImage** (self-contained, suitable for Linux Mint),
-  produced by `scripts/package-appimage.sh`.
-- Desktop metadata: `packaging/linux/521c.desktop` plus the `521c` icon
-  (SVG source in `native/crates/521c-desktop/assets/`, PNG renders committed
-  for AppImage/desktop use).
-- Install/uninstall: documented in `docs/DEVELOPMENT.md` → "Desktop app".
+521C follows the Anakyklos Linux packaging standard:
+
+- Primary end-user artifact for Linux Mint / Ubuntu / Debian-family systems: **`.deb`**.
+- Preferred package name: `anakyklos-521c`; the installed desktop binary remains `521c`.
+- The package should install the binary, desktop entry, icons/AppStream metadata and only the runtime dependencies actually required by the product.
+- Clean install, upgrade and uninstall must be verified on a supported Debian-family environment before `.deb` replaces the currently working release path.
+- The existing AppImage pipeline may remain temporarily as a migration/compatibility artifact, but AppImage is no longer the long-term primary format.
+- Future normal upgrades should be compatible with an official signed Anakyklos APT repository rather than requiring a 521C-specific updater daemon.
+- Desktop metadata remains under `packaging/linux/`; package-generation implementation details may evolve without changing this contract.
 
 ## 9. Runtime dependencies (Linux Mint-class systems)
 
@@ -190,11 +193,11 @@ The desktop app owns the device-write side of Auto Game Mode:
 
 Normal use never requires root.
 
-## 10. Launch verification
+## 10. Launch and package verification
 
 `521c --self-test` creates the window, starts the event pump, processes events
-briefly and exits 0. The packaging gate and CI use it to verify launch without
-interactive display time. Interactive behavior still requires a display.
+briefly and exits 0. Packaging gates and CI should use it to verify launch
+without interactive display time. Interactive behavior still requires a display.
 
 `521c --mock --close-self-test` additionally verifies the close lifecycle
 (issue #40): after the window opens, the app dispatches the same
@@ -202,5 +205,9 @@ interactive display time. Interactive behavior still requires a display.
 the run only passes when the close handler persists the configuration, ends
 the event loop, and the process exits 0 with the persisted config still
 valid. `scripts/test-desktop-close.sh` wraps this with a timeout so a hidden
-survivor process fails the gate; CI runs it against both the dev binary and
-the packaged AppImage under a virtual display.
+survivor process fails the gate.
+
+The `.deb` release path must additionally verify install, upgrade and uninstall
+behavior plus desktop integration on a representative supported Debian-family
+environment. During migration, the existing AppImage may continue to run its
+current package/launch checks until that artifact is retired.
