@@ -88,7 +88,9 @@ The baseline product target is a native Linux desktop application for Linux Mint
 - PipeWire/WirePlumber-compatible APIs for host audio integration;
 - BlueZ over D-Bus for Bluetooth device access;
 - MPRIS over D-Bus only where media state/control is needed for an audio-domain behavior;
-- AppImage as the first self-contained distribution artifact.
+- a Debian `.deb` package as the primary end-user installation artifact, following the Anakyklos Linux packaging standard.
+
+The existing AppImage path may remain temporarily during packaging migration, but it is not the long-term primary distribution format. The `.deb` path should replace it only after clean install, upgrade and uninstall behavior is verified on a supported Debian-family environment.
 
 Normal application use must not require root.
 
@@ -224,7 +226,8 @@ The existing React interface is a useful behavior/visual reference, not a requir
 - native BlueZ transport for supported Bluetooth-device operations;
 - native desktop UI;
 - validated local persistence;
-- AppImage distribution;
+- `.deb` distribution as the primary supported Debian-family package path;
+- temporary AppImage compatibility during migration only while it remains useful;
 - mock/fake boundaries for deterministic development and testing;
 - documented diagnostics and troubleshooting.
 
