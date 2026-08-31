@@ -1,10 +1,14 @@
 # 521C
 
-**Independent, unofficial Linux-first control surface for QCY earbuds.**
+**Linux-first local audio control and orchestration system, with QCY/HT08 as the first concrete device path.**
 
-The name comes from Bluetooth Company ID `0x521C`, used in QCY manufacturer data. 521C is not affiliated with, endorsed by, or related to QCY / Dongguan Hele Electronics.
+521C owns the local audio-control domain: host audio state and routing, processing configuration, supported audio-device capabilities, and audio-specific automation. The target architecture separates host audio, generic device capabilities, and vendor-specific adapters rather than treating one vendor protocol as the definition of the product.
 
-The first device profile is **QCY MeloBuds Pro (HT08)**. The project combines a protocol-focused core, a control UI, a CLI, diagnostics, and host-side profiles while keeping unsupported features explicitly out of the trusted control path.
+521C began as an independent, unofficial control surface for QCY earbuds. The name comes from Bluetooth Company ID `0x521C`, used in QCY manufacturer data. 521C is not affiliated with, endorsed by, or related to QCY / Dongguan Hele Electronics.
+
+The first release-quality vendor/device profile remains **QCY MeloBuds Pro (HT08)**. Existing QCY work combines a protocol-focused core, a control UI, a CLI, diagnostics, and host-side profiles while keeping unsupported features explicitly out of the trusted control path.
+
+The broader audio-domain scope is an accepted product direction, not a claim that every host-audio capability is already implemented. [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) is normative for product intent; code, tests, support matrices and protocol evidence remain authoritative for delivered capability.
 
 ## Autonomous development entrypoint
 
@@ -24,6 +28,8 @@ The autonomous plan gives the implementation agent broad authority to make ordin
 
 ## Current capabilities
 
+The currently implemented/evidenced surface remains QCY/HT08-led:
+
 - Left / right / case battery and charging flags
 - Firmware readout
 - ANC and transparency scenes
@@ -37,7 +43,7 @@ The autonomous plan gives the implementation agent broad authority to make ordin
 
 These are current implementation surfaces, not a claim that every item is already verified end-to-end on real HT08 hardware. The per-feature readiness matrix in `docs/SUPPORTED_DEVICES.md` is canonical; the support/evidence model and open issues remain authoritative for release readiness.
 
-Every capability keeps four truths separate (implemented in
+Every vendor/device capability keeps four truths separate (implemented in
 `src/lib/qcy/device/capabilities.ts`), so the UI, CLI and docs can never confuse "the
 device/protocol can do this" with "this build implements it":
 
@@ -51,9 +57,34 @@ device/protocol can do this" with "this build implements it":
 Deterministic rules derive what is shown, enabled, and writable from those truths. A
 feature in the official mobile application is **not** automatically a supported 521C
 control, and a protocol/catalog opcode is **not** automatically implemented. Host-side
-features (system EQ, auto game mode, codec status) stay `not-implemented` or `mock-only`
-until a real host backend exists (issue #13); they are never presented as QCY protocol
-capabilities and never generate earbud writes.
+features stay explicitly unavailable, `not-implemented`, or `mock-only` until a real
+host backend exists; they are never presented as QCY protocol capabilities and never
+generate earbud writes merely because the product direction includes them.
+
+## Target domain model
+
+```text
+521C
+  |
+  |-- Host audio
+  |     PipeWire / WirePlumber
+  |     input/output selection
+  |     volume / mute
+  |     application streams and routing
+  |     host-side EQ / processing configuration
+  |     audio-specific automation
+  |
+  |-- Devices
+  |     Bluetooth / USB / other supported endpoints
+  |     profiles / codecs / sample-rate state where exposed
+  |     device capabilities and state
+  |
+  `-- Vendor adapters
+        QCY / HT08 first
+        future adapters only when justified and evidenced
+```
+
+521C is deliberately **not** a music library/player, streaming client, DAW, general recorder, TTS/transcription platform, communications suite, or catch-all multimedia orchestrator. MPRIS may support audio-specific behavior without transferring ownership of media playback to 521C.
 
 ## Repository map
 
@@ -106,10 +137,12 @@ The final desktop product is intentionally native and lightweight:
 ```text
 Slint UI
   -> Rust application/orchestration
-      -> device profile + protocol codec
-      -> central write authorization
-      -> BlueZ D-Bus transport
-      -> Linux host services (MPRIS / PipeWire as applicable)
+      -> host audio services (PipeWire / WirePlumber as applicable)
+      -> generic audio-device capability layer
+      -> vendor adapter / device profile + protocol codec where needed
+      -> central device-write authorization
+      -> BlueZ D-Bus transport for supported Bluetooth operations
+      -> MPRIS only for audio-specific media-state integration
 ```
 
 The current React/TanStack surface remains useful for mock development, behavior reference and secondary browser experimentation while the native path is built. It is not the primary release runtime.
@@ -147,7 +180,7 @@ cargo test --workspace
 cargo run -p five21cctl -- status
 ```
 
-Examples (mock transport is the deliberate default — no hardware needed):
+Examples for the existing QCY device path (mock transport is the deliberate default — no hardware needed):
 
 ```bash
 521cctl scan
@@ -157,8 +190,7 @@ Examples (mock transport is the deliberate default — no hardware needed):
 521cctl game-mode on
 ```
 
-Operate a real device through the system BlueZ stack by passing `--bluez` and
-selecting the target explicitly:
+Operate a real supported QCY device through the system BlueZ stack by passing `--bluez` and selecting the target explicitly:
 
 ```bash
 521cctl --bluez scan
@@ -166,27 +198,27 @@ selecting the target explicitly:
 521cctl --bluez --device F8:5C:7D:12:08:08 anc transparency
 ```
 
-The native transport lives in `native/crates/qcy-transport`: a single `Transport`
+The native QCY transport lives in `native/crates/qcy-transport`: a single `Transport`
 trait with a deterministic mock backend and a BlueZ/D-Bus backend. Every outbound
-write passes the central write-authorization policy first — destructive opcodes are
-never sent, unknown models stay read-only, and experimental opcodes need a session
-opt-in. Discovery only surfaces candidate QCY devices and preserves unknown-model
-status; it never invents capabilities.
+vendor write passes the central write-authorization policy first — destructive opcodes
+are never sent, unknown models stay read-only, and experimental opcodes need a session
+opt-in. Discovery preserves unknown-model status; it never invents capabilities.
 
 ## Protocol
 
-The independent protocol notes live in [`docs/PROTOCOL.md`](docs/PROTOCOL.md). The main service currently documented is `0000a001-…`, with command write `00001001` and notify `00001002`.
+The independent QCY protocol notes live in [`docs/PROTOCOL.md`](docs/PROTOCOL.md). The main service currently documented is `0000a001-…`, with command write `00001001` and notify `00001002`.
 
 Do **not** invent UUIDs, vendor IDs, opcodes, checksums, firmware formats, or capability mappings. Evidence and uncertainty are part of the data model.
 
 ## Safety invariants
 
-- No root requirement and no Bluetooth daemon replacement.
-- BLE input is untrusted: validate framing, lengths, bounds, enums, and timeouts.
-- Unknown/generic QCY devices are read-only by default in the target architecture.
-- Destructive opcodes `0x01`, `0x02`, and `0x03` are never sent by unattended automation.
+- No root requirement and no Bluetooth/audio daemon replacement.
+- BLE/device input is untrusted: validate framing, lengths, bounds, enums, and timeouts.
+- Unknown/generic vendor devices are read-only by default for vendor-protocol operations in the target architecture.
+- Destructive QCY opcodes `0x01`, `0x02`, and `0x03` are never sent by unattended automation.
 - Firmware OTA is not supported until format, integrity checks, failure behavior, and recovery are proven.
 - Find Earbuds/chime is interactive and preflight-gated: no locator tone is transmitted before confirmation completes, known-worn targets are blocked by default, unknown wear state requires a stronger explicit confirmation, a cooldown rate-limits repeats, and the CLI/automation path refuses it.
+- Host-side audio actions must be scoped and reversible where practical; broad product direction does not authorize destructive system reconfiguration.
 - No telemetry or implicit cloud dependency.
 - Autonomous development must respect [`docs/HOST_SAFETY.md`](docs/HOST_SAFETY.md).
 
